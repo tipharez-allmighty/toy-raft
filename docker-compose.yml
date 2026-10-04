@@ -1,0 +1,65 @@
+networks:
+  raft-net:
+    driver: bridge
+
+services:
+  node1:
+    build: .
+    container_name: node1
+    networks:
+      - raft-net
+    environment:
+      - NODE_ID=1
+      - ADDRESS=node1:50051
+      - PEERS=2=node2:50051,3=node3:50051,4=node4:50051,5=node5:50051
+    ports:
+      - "8001:50051"
+
+  node2:
+    build: .
+    container_name: node2
+    networks:
+      - raft-net
+    environment:
+      - NODE_ID=2
+      - ADDRESS=node2:50051
+      - PEERS=1=node1:50051,3=node3:50051,4=node4:50051,5=node5:50051
+    ports:
+      - "8002:50051"
+
+  node3:
+    build: .
+    container_name: node3
+    networks:
+      - raft-net
+    environment:
+      - NODE_ID=3
+      - ADDRESS=node3:50051
+      - PEERS=1=node1:50051,2=node2:50051,4=node4:50051,5=node5:50051
+    ports:
+      - "8003:50051"
+
+  node4:
+    build: .
+    container_name: node4
+    networks:
+      - raft-net
+    environment:
+      - NODE_ID=4
+      - ADDRESS=node4:50051
+      - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,5=node5:50051
+    ports:
+      - "8004:50051"
+
+  node5:
+    build: .
+    container_name: node5
+    networks:
+     - raft-net
+    environment:
+     - NODE_ID=5
+     - ADDRESS=node5:50051
+     - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,4=node4:50051
+    ports:
+     - "8005:50051"
+

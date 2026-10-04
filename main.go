@@ -84,11 +84,12 @@ func main() {
 		defer ticker.Stop()
 
 		for range ticker.C {
+			slog.Info("Current log entries", "node", node.NodeID, "log", node.Log)
 			for peerID, peerAddr := range node.Peers {
 				if peerAddr == node.Addr {
 					continue
 				}
-				slog.Info("Processign new rpc call", "peer", peerID, "address", peerAddr)
+				slog.Info("Processing new rpc call", "peer", peerID, "address", peerAddr)
 
 				go func(addr string) {
 					client, err := rpc.Dial("tcp", addr)
