@@ -3,8 +3,18 @@ networks:
     driver: bridge
 
 services:
-  node1:
+  cli-client:
     build: .
+    entrypoint: ["./raft-cli"] 
+    container_name: cli-client
+    profiles: ["client"]
+    networks:
+     - raft-net
+    environment:
+     - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,4=node4:50051,5=node5:50051
+  node1:    
+    build: .
+    command: ./raft-node
     container_name: node1
     networks:
       - raft-net
@@ -17,6 +27,7 @@ services:
 
   node2:
     build: .
+    command: ./raft-node
     container_name: node2
     networks:
       - raft-net
@@ -29,6 +40,7 @@ services:
 
   node3:
     build: .
+    command: ./raft-node
     container_name: node3
     networks:
       - raft-net
@@ -41,6 +53,7 @@ services:
 
   node4:
     build: .
+    command: ./raft-node
     container_name: node4
     networks:
       - raft-net
@@ -53,6 +66,7 @@ services:
 
   node5:
     build: .
+    command: ./raft-node
     container_name: node5
     networks:
      - raft-net

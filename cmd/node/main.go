@@ -8,8 +8,9 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	env "toy-raft"
 )
 
 type Node struct {
@@ -38,22 +39,9 @@ func MustLoadNode() *Node {
 	if !ok {
 		panic(errors.New("faield to load ADDRESS"))
 	}
-	peers, ok := os.LookupEnv("PEERS")
-	if !ok {
-		panic(errors.New("failed to load env variabel PEERS"))
-	}
-	peersList := strings.Split(peers, ",")
-	peersMap := make(map[int]string, len(peersList))
-	for _, peer := range peersList {
-		peerAddr := strings.Split(peer, "=")
-		peerID, err := strconv.Atoi(peerAddr[0])
-		if err != nil {
-			panic(errors.New("failed to cast peer id into int"))
-		}
-		if peerAddr[1] == "" {
-			panic(errors.New("peer address is not provided"))
-		}
-		peersMap[peerID] = peerAddr[1]
+	peersMap, err := env.LoadPeers()
+	if err != nil {
+		panic(err)
 	}
 	return &Node{nodeIDInt, addr, []string{}, peersMap}
 }
