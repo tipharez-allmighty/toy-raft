@@ -18,7 +18,6 @@ func main() {
 		slog.Error("usage: raft-cli <commands>")
 		return
 	}
-	slog.Info("Peers", "peers", peersMap)
 	peerAddr := peersMap[rand.Intn(len(peersMap))+1]
 	slog.Info("Sending data", "data", os.Args[1:], "peer", peerAddr)
 	client, err := rpc.Dial("tcp", peerAddr)
