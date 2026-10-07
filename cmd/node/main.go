@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	env "toy-raft"
@@ -24,15 +25,14 @@ const (
 
 const (
 	// Heartbeat Interval (e.g., 50ms) << Min Election Timeout (e.g., 150ms)
-	ElectionTimeout = 150 * time.Millisecond
+	ElectionTimeout  = 150 * time.Millisecond
 	HeartBeatTimeout = 50 * time.Millisecond
-	Jitter      = 150
+	Jitter           = 150
 )
 
 func RandomElectionTimeout() time.Duration {
 	return ElectionTimeout + time.Duration(rand.Intn(Jitter))*time.Millisecond
 }
-
 
 type VoteReply struct {
 	FromID      int
@@ -67,7 +67,7 @@ type Node struct {
 	Log           []string
 	Peers         map[int]string
 	ElectionTimer *time.Timer
-	HeartbChan    chan AppendEntriesArgs
+	mu            sync.RWMutex
 }
 
 func (n *Node) RequestVote(voteChan chan<- VoteReply) {
@@ -96,6 +96,8 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 }
 
 func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	reply.FromID = n.NodeID
 	reply.Term = n.Term
 	reply.VoteGranted = false
@@ -112,6 +114,7 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 	if candidate.Term > n.Term {
 		n.State = Follower
 		n.Term = candidate.Term
+		reply.Term = n.Term
 		n.VotedFor = nil
 	}
 	// 3. GRANT VOTE (ONLY ONE VOTE PER TERM)
@@ -152,6 +155,8 @@ func (n *Node) SendHeartBeat() {
 }
 
 func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.Log = append(n.Log, entry.Entries...)
 	reply.FromID = n.NodeID
 	reply.Term = n.Term
@@ -159,15 +164,17 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	if entry.Term < n.Term {
 		return nil
 	}
+	n.State = Follower
+	n.Term = entry.Term
+	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
-	n.HeartbChan <- *entry
 	return nil
 }
 
 func MustLoadNode() *Node {
 	nodeID, ok := os.LookupEnv("NODE_ID")
 	if !ok {
-		panic(errors.New("faield to load Node id"))
+		panic(errors.New("failed to load Node id"))
 	}
 	nodeIDInt, err := strconv.Atoi(nodeID)
 	if err != nil {
@@ -175,7 +182,7 @@ func MustLoadNode() *Node {
 	}
 	addr, ok := os.LookupEnv("ADDRESS")
 	if !ok {
-		panic(errors.New("faield to load ADDRESS"))
+		panic(errors.New("failed to load ADDRESS"))
 	}
 	peersMap, err := env.LoadPeers()
 	if err != nil {
@@ -189,7 +196,6 @@ func MustLoadNode() *Node {
 		Log:           []string{},
 		Peers:         peersMap,
 		ElectionTimer: time.NewTimer(RandomElectionTimeout()),
-		HeartbChan:    make(chan AppendEntriesArgs),
 	}
 }
 
@@ -220,16 +226,14 @@ func main() {
 	for {
 		select {
 		case <-heartbTicker.C:
-			if node.State == Leader {
+			node.mu.RLock()
+			isLeader := node.State == Leader
+			node.mu.RUnlock()
+			if isLeader {
 				node.SendHeartBeat()
 			}
-		case heartbData := <-node.HeartbChan:
-			if heartbData.Term >= node.Term {
-				node.Term = heartbData.Term
-				node.State = Follower
-				node.ElectionTimer.Reset(RandomElectionTimeout())
-			}
 		case <-node.ElectionTimer.C:
+			node.mu.Lock()
 			if node.State != Leader {
 				node.State = Candidate
 				node.Term++
@@ -238,8 +242,10 @@ func main() {
 				node.RequestVote(voteChan)
 				node.ElectionTimer.Reset(RandomElectionTimeout())
 			}
+			node.mu.Unlock()
 		case vote := <-voteChan:
 			// 1. IF SOMEONE HAS HIGHER TERM STEP DOWN.
+			node.mu.Lock()
 			if node.State == Candidate {
 				if vote.Term > node.Term {
 					node.Term = vote.Term
@@ -247,10 +253,12 @@ func main() {
 					node.VotedFor = nil
 					votes = 0
 					node.ElectionTimer.Reset(RandomElectionTimeout())
+					node.mu.Unlock()
 					continue
 				}
 				// 2. IGNORE VOTES FROM PREVIOUS TERMS.
 				if vote.Term < node.Term {
+					node.mu.Unlock()
 					continue
 				}
 				// 3. COUNT VOTES FROM CURRENT TERM.
@@ -261,9 +269,13 @@ func main() {
 						node.State = Leader
 						node.SendHeartBeat()
 						heartbTicker.Reset(HeartBeatTimeout)
+						node.mu.Unlock()
+						slog.Info("Leader has been elected", "node", node.NodeID)
+						continue
 					}
 				}
 			}
+			node.mu.Unlock()
 		}
 	}
-
+}
