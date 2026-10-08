@@ -60,6 +60,7 @@ type RequestVoteArgs struct {
 }
 type Node struct {
 	NodeID        int
+	CurrentLeader *int
 	State         NodeState
 	Term          int
 	VotedFor      *int
@@ -116,6 +117,7 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 		n.Term = candidate.Term
 		reply.Term = n.Term
 		n.VotedFor = nil
+		n.CurrentLeader = nil
 	}
 	// 3. GRANT VOTE (ONLY ONE VOTE PER TERM)
 	// Say YES if:
@@ -166,6 +168,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 	n.State = Follower
 	n.Term = entry.Term
+	n.CurrentLeader = &entry.LeaderID
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
 	return nil
@@ -238,6 +241,7 @@ func main() {
 				node.State = Candidate
 				node.Term++
 				node.VotedFor = &node.NodeID
+				node.CurrentLeader = nil
 				votes = 1
 				node.RequestVote(voteChan)
 				node.ElectionTimer.Reset(RandomElectionTimeout())
@@ -267,6 +271,7 @@ func main() {
 					majority := len(node.Peers)/2 + 1
 					if votes >= majority {
 						node.State = Leader
+						node.CurrentLeader = &node.NodeID
 						node.SendHeartBeat()
 						heartbTicker.Reset(HeartBeatTimeout)
 						node.mu.Unlock()
