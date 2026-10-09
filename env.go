@@ -1,5 +1,4 @@
-// Package env.
-package env
+package raft
 
 import (
 	"fmt"
