@@ -37,6 +37,22 @@ In another terminal, run the CLI client:
 podman compose run --rm cli-client hello
 ```
 
+### Testing re-election
+
+You can take nodes down while the cluster is running and watch a new leader get elected. In another terminal:
+
+```sh
+podman pause node2      # freeze the node, like a network partition
+podman unpause node2    # bring it back
+
+podman stop node2       # or kill it completely
+podman start node2
+```
+
+Find the current leader in the logs (`Leader has been elected`) and pause it. Within about 150–300ms the remaining nodes time out, start an election and pick a new leader. When the old leader comes back, it sees the newer term in the next heartbeat and steps down to follower.
+
+The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down two nodes and still have a leader. With three nodes down, elections keep failing until a node comes back.
+
 ## Status
 
 The CLI client is not finished yet. Planned features:
