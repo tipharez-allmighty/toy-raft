@@ -1,4 +1,4 @@
-package main
+e package main
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ func main() {
 		panic(err)
 	}
 	if len(os.Args) < 3 || !raft.IsValidCMD(os.Args[1], os.Args[2]) {
-		slog.Error("usage: raft-cli set x=? OR update x=?", "error", err, "args", os.Args)
+		slog.Error("usage: raft-cli set x=?", "error", err, "args", os.Args)
 		return
 	}
 
