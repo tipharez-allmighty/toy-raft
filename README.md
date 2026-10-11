@@ -56,7 +56,11 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 
 ## Status
 
-The CLI client is not finished yet. Planned features:
+Planned features:
 
-- sending the command given on the command line (the client currently always sends `SET X=10`)
-- disconnecting nodes to test leader election
+- log replication (section 5.3)
+- election restriction (section 5.4.1)
+- commit and apply (section 5.3, 5.4.2)
+- persistence (section 5)
+- log compaction (section 7)
+- cluster membership changes (section 6)
