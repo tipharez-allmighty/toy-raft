@@ -50,7 +50,7 @@ func main() {
 				node.State = raft.Candidate
 				node.Term++
 				node.VotedFor = &node.NodeID
-				node.CurrentLeader = nil
+				node.LeaderID = nil
 				votes = 1
 				node.RequestVote(voteChan)
 				node.ElectionTimer.Reset(raft.RandomElectionTimeout())
@@ -80,7 +80,7 @@ func main() {
 					majority := len(node.Peers)/2 + 1
 					if votes >= majority {
 						node.State = raft.Leader
-						node.CurrentLeader = &node.NodeID
+						node.LeaderID = &node.NodeID
 						node.SendHeartBeat()
 						heartbTicker.Reset(raft.HeartBeatTimeout)
 						node.Mu.Unlock()

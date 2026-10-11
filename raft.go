@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,27 @@ type ExecCmdReply struct {
 	PossibleLeader *int
 	Success        bool
 }
+
+type Command string
+
+const (
+	SetCmd    Command = "set"
+	UpdateCmd Command = "update"
+)
+
+var ValidCMD = map[Command]bool{SetCmd: true, UpdateCmd: true}
+
+func IsValidCMD(cmd, val string) bool {
+	if !ValidCMD[Command(cmd)] {
+		return false
+	}
+	before, after, found := strings.Cut(val, "=")
+	if !found || before == "" || (before[0] >= '0' && before[0] <= '9') || after == "" {
+		return false
+	}
+	return true
+}
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderID     int
@@ -63,7 +85,7 @@ type VoteReply struct {
 
 type Node struct {
 	NodeID        int
-	CurrentLeader *int
+	LeaderID      *int
 	State         NodeState
 	Term          int
 	VotedFor      *int
@@ -120,7 +142,7 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 		n.Term = candidate.Term
 		reply.Term = n.Term
 		n.VotedFor = nil
-		n.CurrentLeader = nil
+		n.LeaderID = nil
 	}
 	// 3. GRANT VOTE (ONLY ONE VOTE PER TERM)
 	// Say YES if:
@@ -171,7 +193,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 	n.State = Follower
 	n.Term = entry.Term
-	n.CurrentLeader = &entry.LeaderID
+	n.LeaderID = &entry.LeaderID
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
 	return nil
@@ -180,12 +202,12 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	if n.CurrentLeader != nil && *n.CurrentLeader == n.NodeID {
+	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
 		reply.LeaderID = &n.NodeID
 		reply.Success = true
 		n.Log = append(n.Log, *cmd)
 	} else {
-		reply.PossibleLeader = n.CurrentLeader
+		reply.PossibleLeader = n.LeaderID
 		reply.Success = false
 	}
 	return nil

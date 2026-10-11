@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/rpc"
 	"os"
+	"strings"
 
 	raft "toy-raft"
 )
@@ -14,10 +16,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if len(os.Args) < 2 {
-		slog.Error("usage: raft-cli <commands>")
+	if len(os.Args) < 3 || !raft.IsValidCMD(os.Args[1], os.Args[2]) {
+		slog.Error("usage: raft-cli set x=? OR update x=?", "error", err, "args", os.Args)
 		return
 	}
+
 	stack := make([]string, 0, len(peersMap))
 	for _, peer := range peersMap {
 		stack = append(stack, peer)
@@ -42,7 +45,7 @@ func main() {
 		}
 
 		var reply raft.ExecCmdReply
-		cmd := "SET X=10"
+		cmd := strings.ToUpper(fmt.Sprintf("%v %v", os.Args[1], os.Args[2]))
 		if err := client.Call("Node.ExecuteCommand", &cmd, &reply); err != nil {
 			slog.Error("RPC call failed", "target", currentPeer, "error", err)
 			os.Exit(1)
@@ -50,7 +53,7 @@ func main() {
 		client.Close()
 
 		if reply.Success && reply.LeaderID != nil {
-			slog.Info("Client successfully found a leader and got his command executed by leader", "leader", *reply.LeaderID)
+			slog.Info("Client successfully found a leader and got his command executed by leader", "leader", *reply.LeaderID, "Command", cmd)
 			return
 		} else if !reply.Success && reply.PossibleLeader != nil {
 			possibleLeader, ok := peersMap[*reply.PossibleLeader]
