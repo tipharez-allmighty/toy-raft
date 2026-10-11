@@ -38,17 +38,9 @@ type ExecCmdReply struct {
 	Success        bool
 }
 
-type Command string
-
-const (
-	SetCmd    Command = "set"
-	UpdateCmd Command = "update"
-)
-
-var ValidCMD = map[Command]bool{SetCmd: true, UpdateCmd: true}
 
 func IsValidCMD(cmd, val string) bool {
-	if !ValidCMD[Command(cmd)] {
+	if cmd != "set" {
 		return false
 	}
 	before, after, found := strings.Cut(val, "=")
