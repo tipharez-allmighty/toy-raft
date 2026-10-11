@@ -38,9 +38,10 @@ type ExecCmdReply struct {
 	Success        bool
 }
 
+const SetCmd string = "set"
 
 func IsValidCMD(cmd, val string) bool {
-	if cmd != "set" {
+	if cmd != SetCmd {
 		return false
 	}
 	before, after, found := strings.Cut(val, "=")
