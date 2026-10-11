@@ -40,7 +40,7 @@ type ExecCmdReply struct {
 
 const SetCmd string = "set"
 
-func IsValidCMD(cmd, val string) bool {
+func IsValidCmd(cmd, val string) bool {
 	if cmd != SetCmd {
 		return false
 	}
