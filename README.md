@@ -35,7 +35,6 @@ In another terminal, run the CLI client:
 
 ```sh
 podman compose run --rm cli-client set x=10
-podman compose run --rm cli-client update x=20
 ```
 
 ### Testing re-election
