@@ -180,7 +180,6 @@ func (n *Node) SendHeartBeat() {
 func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	n.Log = append(n.Log, entry.Entries...)
 	reply.FromID = n.NodeID
 	reply.Term = n.Term
 	reply.Success = false
@@ -207,7 +206,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 			break
 		}
 	}
-
+	slog.Info("Current log", "entries", n.Log, "leader", entry.LeaderID, "follower", n.NodeID)
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
@@ -235,18 +234,13 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 				}
 				defer client.Close()
 				var appendReply AppendEntriesReply
-				var prevLogTerm int
-				if l := len(n.Log); l > 0 {
-					prevLog := n.Log[l-1]
-					prevLogTerm = prevLog.Term
-				}
 				nextIdx := n.NextIndex[addr]
 				entriesArgs := AppendEntriesArgs{
 					LeaderID:     *reply.LeaderID,
 					Term:         n.Term,
 					Entries:      n.Log[nextIdx:],
 					PrevLogIndex: nextIdx - 1,
-					PrevLogTerm:  prevLogTerm,
+					PrevLogTerm:  n.Log[nextIdx-1].Term,
 				}
 				if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
 					slog.Error("RPC append entry call failed", "target", peerID, "error", err)
@@ -293,7 +287,7 @@ func MustLoadNode() *Node {
 		State:         Follower,
 		Term:          0,
 		Addr:          addr,
-		Log:           []LogEntry{},
+		Log:           []LogEntry{{}},
 		Peers:         peersMap,
 		ElectionTimer: time.NewTimer(RandomElectionTimeout()),
 	}
