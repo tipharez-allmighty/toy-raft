@@ -13,6 +13,7 @@ So far it covers **leader election** (section 5.2 of the paper):
 - **Voting rules:** a node rejects candidates with an older term, steps down when it sees a newer term, and grants at most one vote per term.
 - **Majority wins:** a candidate with votes from a majority of the cluster becomes leader.
 - **Heartbeats:** the leader sends empty `AppendEntries` every 50ms to keep its leadership. Followers reset their election timer when a heartbeat arrives.
+- **Log replication**: Log is replicated to all the followers after client sends execute command request to the leader.
 
 It also has **leader discovery** for the client:
 
@@ -57,7 +58,6 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 
 Planned features:
 
-- log replication (section 5.3)
 - election restriction (section 5.4.1)
 - commit and apply (section 5.3, 5.4.2)
 - persistence (section 5)
