@@ -50,6 +50,7 @@ func main() {
 				node.State = raft.Candidate
 				node.Term++
 				node.VotedFor = &node.NodeID
+				node.NextIndex = nil
 				node.LeaderID = nil
 				votes = 1
 				node.RequestVote(voteChan)
@@ -63,6 +64,7 @@ func main() {
 				if vote.Term > node.Term {
 					node.Term = vote.Term
 					node.State = raft.Follower
+					node.NextIndex = nil
 					node.VotedFor = nil
 					votes = 0
 					node.ElectionTimer.Reset(raft.RandomElectionTimeout())
@@ -81,6 +83,8 @@ func main() {
 					if votes >= majority {
 						node.State = raft.Leader
 						node.LeaderID = &node.NodeID
+						node.NextIndex = raft.InitIndexMap(node.Peers, node.NodeID, 1)
+						node.MatchIndex = raft.InitIndexMap(node.Peers, node.NodeID, 0)
 						node.SendHeartBeat()
 						heartbTicker.Reset(raft.HeartBeatTimeout)
 						node.Mu.Unlock()
