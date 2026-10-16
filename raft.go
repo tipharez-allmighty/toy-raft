@@ -13,14 +13,6 @@ import (
 	"time"
 )
 
-type NodeState string
-
-const (
-	Follower  NodeState = "follower"
-	Candidate NodeState = "candidate"
-	Leader    NodeState = "leader"
-)
-
 const (
 	// Heartbeat Interval (e.g., 50ms) << Min Election Timeout (e.g., 150ms)
 	ElectionTimeout  = 150 * time.Millisecond
@@ -81,6 +73,14 @@ type VoteReply struct {
 	VoteGranted bool
 }
 
+type NodeState string
+
+const (
+	Follower  NodeState = "follower"
+	Candidate NodeState = "candidate"
+	Leader    NodeState = "leader"
+)
+
 type Node struct {
 	NodeID        int
 	LeaderID      *int
@@ -88,6 +88,7 @@ type Node struct {
 	Term          int
 	VotedFor      *int
 	Addr          string
+	CommitIndex   int
 	Log           []LogEntry
 	Peers         map[int]string
 	NextIndex     map[string]int
@@ -111,7 +112,9 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 			defer client.Close()
 
 			var voteReply VoteReply
+			n.Mu.RLock()
 			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term}
+			n.Mu.RUnlock()
 			if err := client.Call("Node.GiveVote", &candidate, &voteReply); err != nil {
 				slog.Error("RPC voting call failed", "target", addr, "error", err)
 				return
@@ -158,22 +161,84 @@ func (n *Node) SendHeartBeat() {
 			continue
 		}
 		slog.Info("Sending heartbeat through RPC", "leader", n.NodeID, "follower", peerID)
-		go func(addr string) {
-			client, err := rpc.Dial("tcp", addr)
-			if err != nil {
-				return
+		go n.ReplicateLog(peerID, peerAddr)
+	}
+}
+
+func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
+		reply.LeaderID = &n.NodeID
+		reply.Success = true
+		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd})
+		for peerID, peerAddr := range n.Peers {
+			if peerAddr == n.Addr {
+				continue
 			}
-			defer client.Close()
-			var appendReply AppendEntriesReply
-			entriesArgs := AppendEntriesArgs{
-				LeaderID: n.NodeID,
-				Term:     n.Term,
+			slog.Info("Sending command to replicas through RPC", "leader", n.NodeID, "replica", peerAddr)
+			go n.ReplicateLog(peerID, peerAddr)
+		}
+	} else {
+		reply.PossibleLeader = n.LeaderID
+		reply.Success = false
+	}
+	return nil
+}
+
+func (n *Node) ReplicateLog(peerID int, peerAddr string) {
+	client, err := rpc.Dial("tcp", peerAddr)
+	if err != nil {
+		return
+	}
+	defer client.Close()
+	n.Mu.RLock()
+	var appendReply AppendEntriesReply
+	nextIdx := n.NextIndex[peerAddr]
+	entriesArgs := AppendEntriesArgs{
+		LeaderID:     *n.LeaderID,
+		Term:         n.Term,
+		LeaderCommit: n.CommitIndex,
+		Entries:      n.Log[nextIdx:],
+		PrevLogIndex: nextIdx - 1,
+		PrevLogTerm:  n.Log[nextIdx-1].Term,
+	}
+	n.Mu.RUnlock()
+	if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
+		slog.Error("RPC append entry call failed", "target", peerID, "error", err)
+		return
+	}
+
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if appendReply.Success {
+		matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
+		n.MatchIndex[peerAddr] = matchLogIdx
+		n.NextIndex[peerAddr] = matchLogIdx + 1
+		// Qourum check for commit
+		for i := len(n.Log) - 1; i > n.CommitIndex; i-- {
+			// 1. If terms dont match keep looping towards begining of the log
+			if n.Term != n.Log[i].Term {
+				continue
 			}
-			if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
-				slog.Error("RPC heartbeat call failed", "target", peerID, "error", err)
-				return
+			// 2. Count how many followers including leader matched or exceeded current index
+			count := 1
+			for _, matchIdx := range n.MatchIndex {
+				if matchIdx >= i {
+					count++
+				}
+				// 3. If quorum achieved break
+				if count > len(n.Peers)/2 {
+					n.CommitIndex = i
+					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
+					break
+				}
 			}
-		}(peerAddr)
+		}
+	} else {
+		if n.NextIndex[peerAddr] > 1 {
+			n.NextIndex[peerAddr]--
+		}
 	}
 }
 
@@ -210,48 +275,9 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
+	n.CommitIndex = min(entry.LeaderCommit, len(n.Log)-1)
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
-	return nil
-}
-
-func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
-	n.Mu.Lock()
-	defer n.Mu.Unlock()
-	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
-		reply.LeaderID = &n.NodeID
-		reply.Success = true
-		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd})
-		for peerID, peerAddr := range n.Peers {
-			if peerAddr == n.Addr {
-				continue
-			}
-			slog.Info("Sending command to replicas through RPC", "leader", reply.LeaderID, "replica", peerAddr)
-			go func(addr string) {
-				client, err := rpc.Dial("tcp", addr)
-				if err != nil {
-					return
-				}
-				defer client.Close()
-				var appendReply AppendEntriesReply
-				nextIdx := n.NextIndex[addr]
-				entriesArgs := AppendEntriesArgs{
-					LeaderID:     *reply.LeaderID,
-					Term:         n.Term,
-					Entries:      n.Log[nextIdx:],
-					PrevLogIndex: nextIdx - 1,
-					PrevLogTerm:  n.Log[nextIdx-1].Term,
-				}
-				if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
-					slog.Error("RPC append entry call failed", "target", peerID, "error", err)
-				}
-			}(peerAddr)
-
-		}
-	} else {
-		reply.PossibleLeader = n.LeaderID
-		reply.Success = false
-	}
 	return nil
 }
 
