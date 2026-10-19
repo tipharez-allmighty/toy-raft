@@ -52,7 +52,7 @@ func main() {
 		cmd := strings.ToUpper(fmt.Sprintf("%v %v", os.Args[1], os.Args[2]))
 		if err := client.Call("Node.ExecuteCommand", &cmd, &reply); err != nil {
 			slog.Error("RPC call failed", "target", currentPeer, "error", err)
-			os.Exit(1)
+			continue
 		}
 		client.Close()
 
