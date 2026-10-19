@@ -3,6 +3,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/rpc"
@@ -81,20 +82,44 @@ const (
 	Leader    NodeState = "leader"
 )
 
+type StateMachine struct {
+	State map[string]string
+	Mu    sync.Mutex
+}
+
+func (sm *StateMachine) Apply(cmd string) error {
+	sm.Mu.Lock()
+	defer sm.Mu.Unlock()
+	opKey, val, found := strings.Cut(cmd, "=")
+	if !found {
+		return fmt.Errorf("state machine failed to parse command: %v", cmd)
+	}
+	_, key, found := strings.Cut(opKey, " ")
+	if !found {
+		return fmt.Errorf("state machine faield to parse commands key value pair: %v", cmd)
+	}
+	sm.State[key] = val
+	slog.Info("New command was applied to the state machine", "command", cmd, "current_state", sm.State)
+	return nil
+}
+
 type Node struct {
 	NodeID        int
 	LeaderID      *int
 	State         NodeState
+	StateMachine  StateMachine
 	Term          int
 	VotedFor      *int
 	Addr          string
 	CommitIndex   int
+	LastApplied   int
 	Log           []LogEntry
 	Peers         map[int]string
 	NextIndex     map[string]int
 	MatchIndex    map[string]int
 	ElectionTimer *time.Timer
 	Mu            sync.RWMutex
+	ApplyCond     *sync.Cond
 }
 
 func (n *Node) RequestVote(voteChan chan<- VoteReply) {
@@ -160,7 +185,7 @@ func (n *Node) SendHeartBeat() {
 		if peerAddr == n.Addr {
 			continue
 		}
-		slog.Info("Sending heartbeat through RPC", "leader", n.NodeID, "follower", peerID)
+		slog.Debug("Sending heartbeat through RPC", "leader", n.NodeID, "follower", peerID)
 		go n.ReplicateLog(peerID, peerAddr)
 	}
 }
@@ -208,7 +233,6 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		slog.Error("RPC append entry call failed", "target", peerID, "error", err)
 		return
 	}
-
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	if appendReply.Success {
@@ -231,6 +255,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 				if count > len(n.Peers)/2 {
 					n.CommitIndex = i
 					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
+					n.ApplyCond.Signal()
 					break
 				}
 			}
@@ -239,6 +264,23 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		if n.NextIndex[peerAddr] > 1 {
 			n.NextIndex[peerAddr]--
 		}
+	}
+}
+
+func (n *Node) ApplyLogWorker() {
+	for {
+		n.Mu.Lock()
+		for n.CommitIndex <= n.LastApplied {
+			n.ApplyCond.Wait()
+		}
+		n.LastApplied++
+		entry := n.Log[n.LastApplied]
+		n.Mu.Unlock()
+		if err := n.StateMachine.Apply(entry.Command); err != nil {
+			slog.Error("Worker received error while applaying entry command to state machine", "node", n.NodeID, "error", err)
+			return
+		}
+		slog.Info("Worker successfully aplied entry command to state machine", "node", n.NodeID)
 	}
 }
 
@@ -271,7 +313,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 			break
 		}
 	}
-	slog.Info("Current log", "entries", n.Log, "leader", entry.LeaderID, "follower", n.NodeID)
+	slog.Debug("Current log", "entries", n.Log, "leader", entry.LeaderID, "follower", n.NodeID)
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
@@ -308,13 +350,17 @@ func MustLoadNode() *Node {
 	if err != nil {
 		panic(err)
 	}
-	return &Node{
+	node := Node{
 		NodeID:        nodeIDInt,
 		State:         Follower,
+		StateMachine:  StateMachine{State: make(map[string]string)},
 		Term:          0,
 		Addr:          addr,
 		Log:           []LogEntry{{}},
 		Peers:         peersMap,
 		ElectionTimer: time.NewTimer(RandomElectionTimeout()),
 	}
+	node.ApplyCond = sync.NewCond(&node.Mu)
+	go node.ApplyLogWorker()
+	return &node
 }
