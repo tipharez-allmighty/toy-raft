@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/rpc"
 	"os"
 	"strings"
+	"time"
 
 	raft "toy-raft"
 )
@@ -38,11 +40,13 @@ func main() {
 		}
 		visited[currentPeer] = true
 		slog.Info("Sending data", "data", os.Args[1:], "peer", currentPeer)
-		client, err := rpc.Dial("tcp", currentPeer)
+		conn, err := net.Dial("tcp", currentPeer)
 		if err != nil {
 			slog.Error("Failed to dial peer", "peer", currentPeer, "error", err)
-			os.Exit(1)
+			continue
 		}
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+		client := rpc.NewClient(conn)
 
 		var reply raft.ExecCmdReply
 		cmd := strings.ToUpper(fmt.Sprintf("%v %v", os.Args[1], os.Args[2]))
