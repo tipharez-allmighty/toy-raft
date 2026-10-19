@@ -218,6 +218,10 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	}
 	defer client.Close()
 	n.Mu.RLock()
+	if n.State != Leader || n.LeaderID == nil {
+		n.Mu.RUnlock()
+		return
+	}
 	var appendReply AppendEntriesReply
 	nextIdx := n.NextIndex[peerAddr]
 	entriesArgs := AppendEntriesArgs{
@@ -235,6 +239,17 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	}
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
+	if appendReply.Term > n.Term {
+		n.Term = appendReply.Term
+		n.State = Follower
+		n.VotedFor = nil
+		n.LeaderID = nil
+		n.ElectionTimer.Reset(RandomElectionTimeout())
+		return
+	}
+	if n.State != Leader || n.Term != entriesArgs.Term {
+		return
+	}
 	if appendReply.Success {
 		matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
 		n.MatchIndex[peerAddr] = matchLogIdx
@@ -294,6 +309,14 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	if entry.Term < n.Term {
 		return nil
 	}
+	if entry.Term > n.Term {
+		n.VotedFor = nil
+	}
+	n.State = Follower
+	n.Term = entry.Term
+	n.LeaderID = &entry.LeaderID
+	n.ElectionTimer.Reset(RandomElectionTimeout())
+
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if entry.PrevLogIndex >= len(n.Log) || entry.PrevLogTerm != n.Log[entry.PrevLogIndex].Term {
 		return nil
@@ -314,15 +337,11 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 		}
 	}
 	slog.Debug("Current log", "entries", n.Log, "leader", entry.LeaderID, "follower", n.NodeID)
-	n.State = Follower
-	n.Term = entry.Term
-	n.LeaderID = &entry.LeaderID
 	newCommitIdx := min(entry.LeaderCommit, entry.PrevLogIndex+len(entry.Entries))
 	if newCommitIdx > n.CommitIndex {
 		n.CommitIndex = newCommitIdx
 		n.ApplyCond.Signal()
 	}
-	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
 	return nil
 }
