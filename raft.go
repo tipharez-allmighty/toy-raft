@@ -280,7 +280,7 @@ func (n *Node) ApplyLogWorker() {
 			slog.Error("Worker received error while applaying entry command to state machine", "node", n.NodeID, "error", err)
 			return
 		}
-		slog.Info("Worker successfully aplied entry command to state machine", "node", n.NodeID)
+		slog.Debug("Worker successfully aplied entry command to state machine", "node", n.NodeID)
 	}
 }
 
@@ -317,7 +317,11 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
-	n.CommitIndex = min(entry.LeaderCommit, len(n.Log)-1)
+	newCommitIdx := min(entry.LeaderCommit, len(n.Log)-1)
+	if newCommitIdx > n.CommitIndex {
+		n.CommitIndex = newCommitIdx
+		n.ApplyCond.Signal()
+	}
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 	reply.Success = true
 	return nil

@@ -14,6 +14,8 @@ So far it covers **leader election** (section 5.2 of the paper):
 - **Majority wins:** a candidate with votes from a majority of the cluster becomes leader.
 - **Heartbeats:** the leader sends empty `AppendEntries` every 50ms to keep its leadership. Followers reset their election timer when a heartbeat arrives.
 - **Log replication**: Log is replicated to all the followers after client sends execute command request to the leader.
+- **Commit:** once an entry is stored on a majority of nodes, the leader advances its commit index and followers pick it up from the next `AppendEntries`.
+- **State machine:** a key-value store (`map[string]string`). A background worker applies committed entries in order, so `set x=10` sets `x` to `10`.
 
 It also has **leader discovery** for the client:
 
@@ -22,7 +24,7 @@ It also has **leader discovery** for the client:
 - If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
 - Each node is tried at most once. If none of them is the leader, the client gives up.
 
-Not implemented yet: log replication, commit/apply of entries, and persistence.
+Not implemented yet: election restriction and persistence.
 
 ## Running
 
@@ -59,7 +61,6 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 Planned features:
 
 - election restriction (section 5.4.1)
-- commit and apply (section 5.3, 5.4.2)
 - persistence (section 5)
 - log compaction (section 7)
 - cluster membership changes (section 6)
