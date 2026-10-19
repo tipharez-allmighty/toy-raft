@@ -317,7 +317,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
-	newCommitIdx := min(entry.LeaderCommit, len(n.Log)-1)
+	newCommitIdx := min(entry.LeaderCommit, entry.PrevLogIndex+len(entry.Entries))
 	if newCommitIdx > n.CommitIndex {
 		n.CommitIndex = newCommitIdx
 		n.ApplyCond.Signal()
