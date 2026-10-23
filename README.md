@@ -16,6 +16,7 @@ So far it covers **leader election** (section 5.2 of the paper):
 - **Log replication**: Log is replicated to all the followers after client sends execute command request to the leader.
 - **Commit:** once an entry is stored on a majority of nodes, the leader advances its commit index and followers pick it up from the next `AppendEntries`.
 - **State machine:** a key-value store (`map[string]string`). A background worker applies committed entries in order, so `set x=10` sets `x` to `10`.
+- **Election restriction**: voter denies its vote if its own log is more up-to-date than that of the candidate.
 
 It also has **leader discovery** for the client:
 
@@ -59,8 +60,6 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 ## Status
 
 Planned features:
-
-- election restriction (section 5.4.1)
 - persistence (section 5)
 - log compaction (section 7)
 - cluster membership changes (section 6)
