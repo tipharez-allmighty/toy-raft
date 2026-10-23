@@ -65,8 +65,10 @@ type AppendEntriesReply struct {
 }
 
 type RequestVoteArgs struct {
-	NodeID int
-	Term   int
+	NodeID       int
+	Term         int
+	LastLogIndex int
+	LastLogTerm  int
 }
 type VoteReply struct {
 	FromID      int
@@ -138,7 +140,9 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 
 			var voteReply VoteReply
 			n.Mu.RLock()
-			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term}
+			lastLogIdx := len(n.Log) - 1
+			lastLogTerm := n.Log[lastLogIdx].Term
+			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term, LastLogIndex: lastLogIdx, LastLogTerm: lastLogTerm}
 			n.Mu.RUnlock()
 			if err := client.Call("Node.GiveVote", &candidate, &voteReply); err != nil {
 				slog.Error("RPC voting call failed", "target", addr, "error", err)
@@ -170,6 +174,14 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 		n.VotedFor = nil
 		n.LeaderID = nil
 	}
+	// if candidates log term is lower then nodes, or the terms are equal but index is lower then nodes,
+	// say NO.
+	lastLogIdx := len(n.Log) - 1
+	lastLogTerm := n.Log[lastLogIdx].Term
+	if candidate.LastLogTerm < lastLogTerm || (candidate.LastLogTerm == lastLogTerm && candidate.LastLogIndex < lastLogIdx) {
+		return nil
+	}
+
 	// Grant vote if:
 	// We haven't voted yet in this term (n.VotedFor == nil) or we already voted for this same candidate (n.VotedFor == args.CandidateID)
 	if n.VotedFor == nil || *n.VotedFor == candidate.NodeID {
