@@ -46,7 +46,7 @@ podman compose run --rm cli-client set x=10
 You can take nodes down while the cluster is running and watch a new leader get elected. In another terminal:
 
 ```sh
-podman pause node2      # freeze the node, like a network partition
+podman pause node2      # freeze the node, but keeps it in memory
 podman unpause node2    # bring it back
 
 podman stop node2       # or kill it completely
@@ -60,6 +60,5 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 ## Status
 
 Planned features:
-- persistence (section 5)
 - log compaction (section 7)
 - cluster membership changes (section 6)
