@@ -83,7 +83,7 @@ func main() {
 	}
 
 	if len(os.Args) < 3 || !raft.IsValidCmd(os.Args[1], os.Args[2]) {
-		slog.Error("usage: raft-cli set x=?", "error", err, "args", os.Args)
+		slog.Error("usage: raft-cli set x=?", "args", os.Args)
 		return
 	}
 
