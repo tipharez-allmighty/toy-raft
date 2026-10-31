@@ -38,7 +38,10 @@ type ExploreCmdReply struct {
 	Success        bool
 }
 
-const SetCmd string = "set"
+const (
+	SetCmd     string = "set"
+	ExploreCmd string = "explore"
+)
 
 func IsValidCmd(cmd, val string) bool {
 	if cmd != SetCmd {
@@ -404,7 +407,7 @@ func MustLoadNode() *Node {
 	if !ok {
 		panic(errors.New("failed to load ADDRESS"))
 	}
-	peersMap, err := LoadPeers()
+	peersMap, err := LoadPeersMap()
 	if err != nil {
 		panic(err)
 	}

@@ -1,13 +1,15 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
 )
 
-func LoadPeers() (map[int]string, error) {
+func LoadPeersMap() (map[int]string, error) {
 	peers, ok := os.LookupEnv("PEERS")
 	if !ok {
 		return nil, fmt.Errorf("failed to load env variable PEERS")
@@ -26,4 +28,30 @@ func LoadPeers() (map[int]string, error) {
 		peersMap[peerID] = peerAddr[1]
 	}
 	return peersMap, nil
+}
+
+func MustLoadPeers() []string {
+	peers, ok := os.LookupEnv("PEERS")
+	if ok {
+		peersList := strings.Split(peers, ",")
+		for _, peer := range peersList {
+			peerAddr := strings.Split(peer, "=")
+			if peerAddr[1] == "" {
+				panic(fmt.Errorf("peer address is not provided for node %v", peerAddr[0]))
+			}
+			peersList = append(peersList, peerAddr[1])
+		}
+		return peersList
+	}
+	ips, err := net.LookupHost("raft")
+	if err != nil {
+		panic(fmt.Errorf("failed to dial host network to get nodes adresses, error: %w", err))
+	}
+	if len(ips) == 0 {
+		panic(errors.New("DNS raft doesnt have nodes"))
+	}
+	for idx, ip := range ips {
+		ips[idx] = net.JoinHostPort(ip, "50051")
+	}
+	return ips
 }

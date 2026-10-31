@@ -15,7 +15,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "explore" {
+	peersList := raft.MustLoadPeers()
+	if len(os.Args) > 1 && os.Args[1] == raft.ExploreCmd {
 		ips, err := net.LookupHost("raft")
 		if err != nil {
 			slog.Error("Failed to dial host network to get nodes adresses", "error", err)
@@ -34,9 +35,8 @@ func main() {
 				continue
 			}
 			visited[currentPeer] = true
-			nodeAddr := net.JoinHostPort(currentPeer, "50051")
 			slog.Info("Trying possible leader", "peer", currentPeer)
-			conn, err := net.Dial("tcp", nodeAddr)
+			conn, err := net.Dial("tcp", currentPeer)
 			if err != nil {
 				slog.Error("Failed to dial peer", "peer", currentPeer, "error", err)
 				continue
@@ -81,27 +81,20 @@ func main() {
 		}
 		return
 	}
-	peersMap, err := raft.LoadPeers()
-	if err != nil {
-		panic(err)
-	}
+
 	if len(os.Args) < 3 || !raft.IsValidCmd(os.Args[1], os.Args[2]) {
 		slog.Error("usage: raft-cli set x=?", "error", err, "args", os.Args)
 		return
 	}
 
-	stack := make([]string, 0, len(peersMap))
-	for _, peer := range peersMap {
-		stack = append(stack, peer)
-	}
-	rand.Shuffle(len(stack), func(i, j int) {
-		stack[i], stack[j] = stack[j], stack[i]
+	rand.Shuffle(len(peersList), func(i, j int) {
+		peersList[i], peersList[j] = peersList[j], peersList[i]
 	})
-	visited := make(map[string]bool, len(peersMap))
-	for len(stack) > 0 {
-		top := len(stack) - 1
-		currentPeer := stack[top]
-		stack = stack[:top]
+	visited := make(map[string]bool, len(peersList))
+	for len(peersList) > 0 {
+		top := len(peersList) - 1
+		currentPeer := peersList[top]
+		peersList = peersList[:top]
 		if visited[currentPeer] {
 			continue
 		}
@@ -127,13 +120,8 @@ func main() {
 			slog.Info("Client successfully found a leader and got his command executed by leader", "leader", *reply.LeaderID, "Command", cmd)
 			return
 		} else if !reply.Success && reply.PossibleLeader != nil {
-			possibleLeader, ok := peersMap[*reply.PossibleLeader]
-			if !ok {
-				slog.Error("Mismatch between peers map of client and server")
-				os.Exit(1)
-			}
-			if !visited[possibleLeader] {
-				stack = append(stack, possibleLeader)
+			if !visited[currentPeer] {
+				peersList = append(peersList, currentPeer)
 				slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
 			} else {
 				slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
