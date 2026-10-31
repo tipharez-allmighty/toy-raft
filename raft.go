@@ -31,6 +31,13 @@ type ExecCmdReply struct {
 	Success        bool
 }
 
+type ExploreCmdReply struct {
+	Leader         *string
+	PossibleLeader *string
+	Peers          map[int]string
+	Success        bool
+}
+
 const SetCmd string = "set"
 
 func IsValidCmd(cmd, val string) bool {
@@ -200,6 +207,22 @@ func (n *Node) SendHeartBeat() {
 		slog.Debug("Sending heartbeat through RPC", "leader", n.NodeID, "follower", peerID)
 		go n.ReplicateLog(peerID, peerAddr)
 	}
+}
+
+func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
+		leaderStr := "node" + strconv.Itoa(n.NodeID)
+		reply.Leader = &leaderStr
+		reply.Peers = n.Peers
+		reply.Success = true
+	} else {
+		posLeaderStr := "node" + strconv.Itoa(*n.LeaderID)
+		reply.PossibleLeader = &posLeaderStr
+		reply.Success = false
+	}
+	return nil
 }
 
 func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {

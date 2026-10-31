@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,72 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "explore" {
+		ips, err := net.LookupHost("raft")
+		if err != nil {
+			slog.Error("Failed to dial host network to get nodes adresses", "error", err)
+			return
+		}
+		if len(ips) == 0 {
+			slog.Warn("DNS raft doesnt have nodes", "ips", ips)
+			return
+		}
+		visited := make(map[string]bool, len(ips))
+		for len(ips) > 0 {
+			top := len(ips) - 1
+			currentPeer := ips[top]
+			ips = ips[:top]
+			if visited[currentPeer] {
+				continue
+			}
+			visited[currentPeer] = true
+			nodeAddr := net.JoinHostPort(currentPeer, "50051")
+			slog.Info("Trying possible leader", "peer", currentPeer)
+			conn, err := net.Dial("tcp", nodeAddr)
+			if err != nil {
+				slog.Error("Failed to dial peer", "peer", currentPeer, "error", err)
+				continue
+			}
+			conn.SetDeadline(time.Now().Add(2 * time.Second))
+			client := rpc.NewClient(conn)
+
+			var reply raft.ExploreCmdReply
+			exploreCmd := "explore"
+			if err := client.Call("Node.ExploreCommand", &exploreCmd, &reply); err != nil {
+				slog.Error("RPC call failed", "target", currentPeer, "error", err)
+				continue
+			}
+			client.Close()
+			if reply.Success && reply.Leader != nil {
+				var sb strings.Builder
+				count := 0
+				for key, val := range reply.Peers {
+					sb.WriteString(strconv.Itoa(key))
+					sb.WriteString("=")
+					sb.WriteString(val)
+					if count < len(reply.Peers)-1 {
+						sb.WriteString(",")
+					}
+					count += 1
+				}
+				slog.Info("Client successfully discovered a cluster", "leader", *reply.Leader, "Peers", sb.String())
+				return
+			} else if !reply.Success && reply.PossibleLeader != nil {
+				if !visited[*reply.PossibleLeader] {
+					ips = append(ips, *reply.PossibleLeader)
+					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
+				} else {
+					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
+				}
+			} else if !reply.Success && reply.PossibleLeader == nil {
+				slog.Info("Possible leader is not found trying next node")
+			} else {
+				slog.Error("Invalid response from the node", "reply", reply)
+				return
+			}
+		}
+		return
+	}
 	peersMap, err := raft.LoadPeers()
 	if err != nil {
 		panic(err)

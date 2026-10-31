@@ -9,7 +9,7 @@ services:
     container_name: cli-client
     profiles: ["client"]
     networks:
-     - raft-net
+      - raft-net
     environment:
      - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,4=node4:50051,5=node5:50051
   node1:    
@@ -17,7 +17,9 @@ services:
     command: ./raft-node
     container_name: node1
     networks:
-      - raft-net
+      raft-net:
+        aliases:
+          - raft
     environment:
       - NODE_ID=1
       - ADDRESS=node1:50051
@@ -30,7 +32,9 @@ services:
     command: ./raft-node
     container_name: node2
     networks:
-      - raft-net
+      raft-net:
+        aliases:
+          - raft
     environment:
       - NODE_ID=2
       - ADDRESS=node2:50051
@@ -43,7 +47,9 @@ services:
     command: ./raft-node
     container_name: node3
     networks:
-      - raft-net
+      raft-net:
+        aliases:
+          - raft
     environment:
       - NODE_ID=3
       - ADDRESS=node3:50051
@@ -56,7 +62,9 @@ services:
     command: ./raft-node
     container_name: node4
     networks:
-      - raft-net
+      raft-net:
+        aliases:
+          - raft
     environment:
       - NODE_ID=4
       - ADDRESS=node4:50051
@@ -69,7 +77,9 @@ services:
     command: ./raft-node
     container_name: node5
     networks:
-     - raft-net
+      raft-net:
+        aliases:
+          - raft
     environment:
      - NODE_ID=5
      - ADDRESS=node5:50051
