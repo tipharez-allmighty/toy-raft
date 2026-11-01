@@ -40,18 +40,26 @@ type ExploreCmdReply struct {
 
 const (
 	SetCmd     string = "set"
+	AddCmd     string = "add"
+	RemoveCmd  string = "remove"
 	ExploreCmd string = "explore"
 )
 
 func IsValidCmd(cmd, val string) bool {
-	if cmd != SetCmd {
+	switch cmd {
+	case SetCmd:
+		before, after, found := strings.Cut(val, "=")
+		if !found || before == "" || (before[0] >= '0' && before[0] <= '9') || after == "" {
+			return false
+		}
+		return true
+	case AddCmd:
+		return false
+	case RemoveCmd:
+		return false
+	default:
 		return false
 	}
-	before, after, found := strings.Cut(val, "=")
-	if !found || before == "" || (before[0] >= '0' && before[0] <= '9') || after == "" {
-		return false
-	}
-	return true
 }
 
 type LogEntry struct {
