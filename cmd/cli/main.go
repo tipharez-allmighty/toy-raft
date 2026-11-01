@@ -17,20 +17,11 @@ import (
 func main() {
 	peersList := raft.MustLoadPeers()
 	if len(os.Args) > 1 && os.Args[1] == raft.ExploreCmd {
-		ips, err := net.LookupHost("raft")
-		if err != nil {
-			slog.Error("Failed to dial host network to get nodes adresses", "error", err)
-			return
-		}
-		if len(ips) == 0 {
-			slog.Warn("DNS raft doesnt have nodes", "ips", ips)
-			return
-		}
-		visited := make(map[string]bool, len(ips))
-		for len(ips) > 0 {
-			top := len(ips) - 1
-			currentPeer := ips[top]
-			ips = ips[:top]
+		visited := make(map[string]bool, len(peersList))
+		for len(peersList) > 0 {
+			top := len(peersList) - 1
+			currentPeer := peersList[top]
+			peersList = peersList[:top]
 			if visited[currentPeer] {
 				continue
 			}
@@ -67,7 +58,7 @@ func main() {
 				return
 			} else if !reply.Success && reply.PossibleLeader != nil {
 				if !visited[*reply.PossibleLeader] {
-					ips = append(ips, *reply.PossibleLeader)
+					peersList = append(peersList, *reply.PossibleLeader)
 					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
 				} else {
 					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)

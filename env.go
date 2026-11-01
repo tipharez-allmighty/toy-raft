@@ -34,12 +34,12 @@ func MustLoadPeers() []string {
 	peers, ok := os.LookupEnv("PEERS")
 	if ok {
 		peersList := strings.Split(peers, ",")
-		for _, peer := range peersList {
+		for idx, peer := range peersList {
 			peerAddr := strings.Split(peer, "=")
 			if peerAddr[1] == "" {
 				panic(fmt.Errorf("peer address is not provided for node %v", peerAddr[0]))
 			}
-			peersList = append(peersList, peerAddr[1])
+			peersList[idx] = peerAddr[1]
 		}
 		return peersList
 	}
