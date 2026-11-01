@@ -57,8 +57,9 @@ func main() {
 				slog.Info("Client successfully discovered a cluster", "leader", *reply.Leader, "Peers", sb.String())
 				return
 			} else if !reply.Success && reply.PossibleLeader != nil {
-				if !visited[*reply.PossibleLeader] {
-					peersList = append(peersList, *reply.PossibleLeader)
+				possibleLeader := net.JoinHostPort(*reply.PossibleLeader, "50051")
+				if !visited[possibleLeader] {
+					peersList = append(peersList, possibleLeader)
 					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
 				} else {
 					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
@@ -111,8 +112,9 @@ func main() {
 			slog.Info("Client successfully found a leader and got his command executed by leader", "leader", *reply.LeaderID, "Command", cmd)
 			return
 		} else if !reply.Success && reply.PossibleLeader != nil {
-			if !visited[currentPeer] {
-				peersList = append(peersList, currentPeer)
+			possibleLeader := "node" + strconv.Itoa(*reply.PossibleLeader) + ":50051"
+			if !visited[possibleLeader] {
+				peersList = append(peersList, possibleLeader)
 				slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
 			} else {
 				slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
