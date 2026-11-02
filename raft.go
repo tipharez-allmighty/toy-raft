@@ -26,16 +26,18 @@ func RandomElectionTimeout() time.Duration {
 }
 
 type ExecCmdReply struct {
-	LeaderID       *int
-	PossibleLeader *int
-	Success        bool
+	LeaderID           *int
+	LeaderAddr         *string
+	PossibleLeader     *int
+	PossibleLeaderAddr *string
+	Success            bool
 }
 
 type ExploreCmdReply struct {
-	Leader         *string
-	PossibleLeader *string
-	Peers          map[int]string
-	Success        bool
+	LeaderAddr         *string
+	PossibleLeaderAddr *string
+	Peers              map[int]string
+	Success            bool
 }
 
 const (
@@ -70,6 +72,7 @@ type LogEntry struct {
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderID     int
+	LeaderAddr   string
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
@@ -126,6 +129,7 @@ func (sm *StateMachine) Apply(cmd string) error {
 type Node struct {
 	NodeID        int
 	LeaderID      *int
+	LeaderAddr    *string
 	State         NodeState
 	StateMachine  StateMachine
 	Term          int
@@ -223,14 +227,12 @@ func (n *Node) SendHeartBeat() {
 func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
-		leaderStr := "node" + strconv.Itoa(n.NodeID)
-		reply.Leader = &leaderStr
+	if (n.LeaderID != nil && n.LeaderAddr != nil) && (*n.LeaderID == n.NodeID && *n.LeaderAddr == n.Addr) {
+		reply.LeaderAddr = &n.Addr
 		reply.Peers = n.Peers
 		reply.Success = true
 	} else {
-		posLeaderStr := "node" + strconv.Itoa(*n.LeaderID)
-		reply.PossibleLeader = &posLeaderStr
+		reply.PossibleLeaderAddr = n.LeaderAddr
 		reply.Success = false
 	}
 	return nil
@@ -239,8 +241,9 @@ func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
 func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	if n.LeaderID != nil && *n.LeaderID == n.NodeID {
+	if (n.LeaderID != nil && n.LeaderAddr != nil) && (*n.LeaderID == n.NodeID && *n.LeaderAddr == n.Addr) {
 		reply.LeaderID = &n.NodeID
+		reply.LeaderAddr = &n.Addr
 		reply.Success = true
 		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd})
 		for peerID, peerAddr := range n.Peers {
@@ -252,6 +255,7 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 		}
 	} else {
 		reply.PossibleLeader = n.LeaderID
+		reply.PossibleLeaderAddr = n.LeaderAddr
 		reply.Success = false
 	}
 	return nil
@@ -272,6 +276,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	nextIdx := n.NextIndex[peerAddr]
 	entriesArgs := AppendEntriesArgs{
 		LeaderID:     *n.LeaderID,
+		LeaderAddr:   *n.LeaderAddr,
 		Term:         n.Term,
 		LeaderCommit: n.CommitIndex,
 		Entries:      n.Log[nextIdx:],
@@ -361,6 +366,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.State = Follower
 	n.Term = entry.Term
 	n.LeaderID = &entry.LeaderID
+	n.LeaderAddr = &entry.LeaderAddr
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)

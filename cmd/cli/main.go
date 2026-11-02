@@ -42,7 +42,7 @@ func main() {
 				continue
 			}
 			client.Close()
-			if reply.Success && reply.Leader != nil {
+			if reply.Success && reply.LeaderAddr != nil {
 				var sb strings.Builder
 				count := 0
 				for key, val := range reply.Peers {
@@ -54,17 +54,16 @@ func main() {
 					}
 					count += 1
 				}
-				slog.Info("Client successfully discovered a cluster", "leader", *reply.Leader, "Peers", sb.String())
+				slog.Info("Client successfully discovered a cluster", "leader", *reply.LeaderAddr, "Peers", sb.String())
 				return
-			} else if !reply.Success && reply.PossibleLeader != nil {
-				possibleLeader := net.JoinHostPort(*reply.PossibleLeader, "50051")
-				if !visited[possibleLeader] {
-					peersList = append(peersList, possibleLeader)
-					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
+			} else if !reply.Success && reply.PossibleLeaderAddr != nil {
+				if !visited[*reply.PossibleLeaderAddr] {
+					peersList = append(peersList, *reply.PossibleLeaderAddr)
+					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeaderAddr)
 				} else {
-					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
+					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeaderAddr)
 				}
-			} else if !reply.Success && reply.PossibleLeader == nil {
+			} else if !reply.Success && reply.PossibleLeaderAddr == nil {
 				slog.Info("Possible leader is not found trying next node")
 			} else {
 				slog.Error("Invalid response from the node", "reply", reply)
@@ -108,16 +107,15 @@ func main() {
 		}
 		client.Close()
 
-		if reply.Success && reply.LeaderID != nil {
-			slog.Info("Client successfully found a leader and got his command executed by leader", "leader", *reply.LeaderID, "Command", cmd)
+		if reply.Success && (reply.LeaderID != nil && reply.LeaderAddr != nil) {
+			slog.Info("Client successfully found a leader and got his command got executed", "leader", *reply.LeaderAddr, "Command", cmd)
 			return
-		} else if !reply.Success && reply.PossibleLeader != nil {
-			possibleLeader := "node" + strconv.Itoa(*reply.PossibleLeader) + ":50051"
-			if !visited[possibleLeader] {
-				peersList = append(peersList, possibleLeader)
-				slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeader)
+		} else if !reply.Success && (reply.PossibleLeader != nil && reply.PossibleLeaderAddr != nil) {
+			if !visited[*reply.PossibleLeaderAddr] {
+				peersList = append(peersList, *reply.PossibleLeaderAddr)
+				slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeaderAddr)
 			} else {
-				slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeader)
+				slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeaderAddr)
 			}
 		} else if !reply.Success && reply.PossibleLeader == nil {
 			slog.Info("Leader is not found trying next node")
