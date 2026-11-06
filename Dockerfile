@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o raft-cli ./cmd/cli
 FROM alpine:latest
 WORKDIR /app
 
-copy --from=builder /app/raft-node .
-copy --from=builder /app/raft-cli .
+COPY --from=builder /app/raft-node .
+COPY --from=builder /app/raft-cli .
 
 EXPOSE 50051

@@ -1,5 +1,6 @@
 networks:
   raft-net:
+    name: raft-net
     driver: bridge
 
 services:
@@ -15,6 +16,7 @@ services:
   node1:    
     build: .
     command: ./raft-node
+    image: raft-node
     container_name: node1
     networks:
       raft-net:
@@ -22,6 +24,7 @@ services:
           - raft
     environment:
       - NODE_ID=1
+      - ROLE=voter
       - ADDRESS=node1:50051
       - PEERS=2=node2:50051,3=node3:50051,4=node4:50051,5=node5:50051
     ports:
@@ -30,6 +33,7 @@ services:
   node2:
     build: .
     command: ./raft-node
+    image: raft-node
     container_name: node2
     networks:
       raft-net:
@@ -37,6 +41,7 @@ services:
           - raft
     environment:
       - NODE_ID=2
+      - ROLE=voter
       - ADDRESS=node2:50051
       - PEERS=1=node1:50051,3=node3:50051,4=node4:50051,5=node5:50051
     ports:
@@ -45,6 +50,7 @@ services:
   node3:
     build: .
     command: ./raft-node
+    image: raft-node
     container_name: node3
     networks:
       raft-net:
@@ -52,6 +58,7 @@ services:
           - raft
     environment:
       - NODE_ID=3
+      - ROLE=voter
       - ADDRESS=node3:50051
       - PEERS=1=node1:50051,2=node2:50051,4=node4:50051,5=node5:50051
     ports:
@@ -60,6 +67,7 @@ services:
   node4:
     build: .
     command: ./raft-node
+    image: raft-node
     container_name: node4
     networks:
       raft-net:
@@ -67,6 +75,7 @@ services:
           - raft
     environment:
       - NODE_ID=4
+      - ROLE=voter
       - ADDRESS=node4:50051
       - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,5=node5:50051
     ports:
@@ -75,6 +84,7 @@ services:
   node5:
     build: .
     command: ./raft-node
+    image: raft-node
     container_name: node5
     networks:
       raft-net:
@@ -82,6 +92,7 @@ services:
           - raft
     environment:
      - NODE_ID=5
+     - ROLE=voter
      - ADDRESS=node5:50051
      - PEERS=1=node1:50051,2=node2:50051,3=node3:50051,4=node4:50051
     ports:

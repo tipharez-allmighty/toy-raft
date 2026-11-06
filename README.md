@@ -40,6 +40,22 @@ In another terminal, run the CLI client:
 ```sh
 podman compose run --rm cli-client set x=10
 ```
+```
+```
+
+Add new node:
+
+```sh
+podman run -d \
+  --name node6 \
+  --hostname node6 \
+  --network raft-net \
+  -e NODE_ID=6 \
+  -e ADDRESS=node6:50051 \
+  -e PEERS=1=node1:50051,2=node2:50051,3=node3:50051,4=node4:50051,5=node5:50051 \
+  raft-node \
+  ./raft-node
+```
 
 ### Testing re-election
 

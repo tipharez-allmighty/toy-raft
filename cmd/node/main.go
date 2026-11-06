@@ -46,6 +46,10 @@ func main() {
 			}
 		case <-node.ElectionTimer.C:
 			node.Mu.Lock()
+			// Learner node can not start an election.
+			if node.Role != raft.Voter {
+				continue
+			}
 			if node.State != raft.Leader {
 				node.State = raft.Candidate
 				node.Term++

@@ -97,6 +97,22 @@ type VoteReply struct {
 	VoteGranted bool
 }
 
+type NodeRole string
+
+const (
+	Voter   NodeRole = "voter"
+	Learner NodeRole = "learner"
+)
+
+func (nr NodeRole) IsValid() bool {
+	switch nr {
+	case Voter, Learner:
+		return true
+	default:
+		return false
+	}
+}
+
 type NodeState string
 
 const (
@@ -130,6 +146,7 @@ type Node struct {
 	NodeID        int
 	LeaderID      *int
 	LeaderAddr    *string
+	Role          NodeRole
 	State         NodeState
 	StateMachine  StateMachine
 	Term          int
@@ -178,6 +195,10 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
+	// If node is listener it can not vote.
+	if n.Role != Voter {
+		return nil
+	}
 	reply.FromID = n.NodeID
 	reply.Term = n.Term
 	reply.VoteGranted = false
@@ -421,12 +442,22 @@ func MustLoadNode() *Node {
 	if !ok {
 		panic(errors.New("failed to load ADDRESS"))
 	}
+	nodeRole := Learner
+	if roleEnv, ok := os.LookupEnv("ROLE"); ok {
+		role := NodeRole(roleEnv)
+		if valid := role.IsValid(); valid {
+			nodeRole = role
+		} else {
+			panic(fmt.Errorf("wrong role %v, should be learner or voter", role))
+		}
+	}
 	peersMap, err := LoadPeersMap()
 	if err != nil {
 		panic(err)
 	}
 	node := Node{
 		NodeID:        nodeIDInt,
+		Role:          nodeRole,
 		State:         Follower,
 		StateMachine:  StateMachine{State: make(map[string]string)},
 		Term:          0,
