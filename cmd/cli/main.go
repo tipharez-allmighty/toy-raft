@@ -15,8 +15,8 @@ import (
 )
 
 func main() {
-	peersList := raft.MustLoadPeers()
 	if len(os.Args) > 1 && os.Args[1] == raft.ExploreCmd {
+		peersList := raft.MustLoadPeers()
 		visited := make(map[string]bool, len(peersList))
 		for len(peersList) > 0 {
 			top := len(peersList) - 1
@@ -89,6 +89,7 @@ func main() {
 		cmd := "getNode"
 		if err := client.Call("Node.GetNode", &cmd, &nodeReply); err != nil {
 			slog.Error("RPC call failed", "target", os.Args[2], "error", err)
+			client.Close()
 			return
 		}
 		client.Close()
@@ -122,9 +123,10 @@ func main() {
 			}
 			client.Close()
 		}
+		return
 
 	}
-
+	peersList := raft.MustLoadPeers()
 	rand.Shuffle(len(peersList), func(i, j int) {
 		peersList[i], peersList[j] = peersList[j], peersList[i]
 	})

@@ -48,6 +48,7 @@ func main() {
 			node.Mu.Lock()
 			// Learner node can not start an election.
 			if node.Role != raft.Voter {
+				node.Mu.Unlock()
 				continue
 			}
 			if node.State != raft.Leader {

@@ -307,6 +307,10 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 	return nil
 }
 
+func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
+	return nil
+}
+
 func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
 	n.Mu.RLock()
 	defer n.Mu.RUnlock()
