@@ -74,8 +74,55 @@ func main() {
 	}
 
 	if len(os.Args) < 3 || !raft.IsValidCmd(os.Args[1], os.Args[2]) {
-		slog.Error("usage: raft-cli set x=?", "args", os.Args)
+		slog.Error("usage: raft-cli set x=? or raft-cli add address:port", "args", os.Args)
 		return
+	}
+	if os.Args[1] == raft.AddCmd {
+		conn, err := net.Dial("tcp", os.Args[2])
+		if err != nil {
+			slog.Error("Failed to dial peer", "peer", os.Args[2], "error", err)
+			return
+		}
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+		client := rpc.NewClient(conn)
+		var nodeReply raft.GetNodeCmdReply
+		cmd := "getNode"
+		if err := client.Call("Node.GetNode", &cmd, &nodeReply); err != nil {
+			slog.Error("RPC call failed", "target", os.Args[2], "error", err)
+			return
+		}
+		client.Close()
+		peersList := make([]string, 0, len(nodeReply.Peers))
+		for _, addr := range nodeReply.Peers {
+			peersList = append(peersList, addr)
+		}
+		visited := make(map[string]bool, len(peersList))
+		for len(peersList) > 0 {
+			top := len(peersList) - 1
+			currentPeer := peersList[top]
+			peersList = peersList[:top]
+			if visited[currentPeer] {
+				continue
+			}
+			visited[currentPeer] = true
+			slog.Info("Sending Add server command", "node", nodeReply.NodeID, "peer", currentPeer)
+			conn, err := net.Dial("tcp", currentPeer)
+			if err != nil {
+				slog.Error("Failed to dial peer", "peer", currentPeer, "error", err)
+				continue
+			}
+			conn.SetDeadline(time.Now().Add(2 * time.Second))
+			client := rpc.NewClient(conn)
+
+			var reply raft.AddServerReply
+			cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr}
+			if err := client.Call("Node.AddServer", &cmd, &reply); err != nil {
+				slog.Error("RPC call failed", "target", currentPeer, "error", err)
+				continue
+			}
+			client.Close()
+		}
+
 	}
 
 	rand.Shuffle(len(peersList), func(i, j int) {

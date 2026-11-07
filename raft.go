@@ -40,6 +40,15 @@ type ExploreCmdReply struct {
 	Success            bool
 }
 
+type GetNodeCmdReply struct {
+	NodeID     int
+	LeaderID   *int
+	LeaderAddr *string
+	Role       NodeRole
+	Addr       string
+	Peers      map[int]string
+}
+
 const (
 	SetCmd     string = "set"
 	AddCmd     string = "add"
@@ -56,7 +65,11 @@ func IsValidCmd(cmd, val string) bool {
 		}
 		return true
 	case AddCmd:
-		return false
+		node, addr, found := strings.Cut(val, ":")
+		if !found || node == "" || addr == "" {
+			return false
+		}
+		return true
 	case RemoveCmd:
 		return false
 	default:
@@ -97,6 +110,18 @@ type VoteReply struct {
 	VoteGranted bool
 }
 
+type AddServerArgs struct {
+	NodeID   int
+	NodeAddr string
+}
+
+type AddServerReply struct {
+	LeaderID           *int
+	LeaderAddr         *string
+	PossibleLeader     *int
+	PossibleLeaderAddr *string
+	Success            bool
+}
 type NodeRole string
 
 const (
@@ -279,6 +304,18 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 		reply.PossibleLeaderAddr = n.LeaderAddr
 		reply.Success = false
 	}
+	return nil
+}
+
+func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
+	n.Mu.RLock()
+	defer n.Mu.RUnlock()
+	reply.NodeID = n.NodeID
+	reply.Addr = n.Addr
+	reply.LeaderID = n.LeaderID
+	reply.LeaderAddr = n.LeaderAddr
+	reply.Peers = n.Peers
+	reply.Role = n.Role
 	return nil
 }
 
