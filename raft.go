@@ -113,6 +113,7 @@ type VoteReply struct {
 type AddServerArgs struct {
 	NodeID   int
 	NodeAddr string
+	Role     NodeRole
 }
 
 type AddServerReply struct {
@@ -186,6 +187,13 @@ type Node struct {
 	ElectionTimer *time.Timer
 	Mu            sync.RWMutex
 	ApplyCond     *sync.Cond
+}
+
+func (n *Node) isLeader() bool {
+	if (n.State == Leader) && (n.LeaderID != nil && n.LeaderAddr != nil) && (*n.LeaderID == n.NodeID && *n.LeaderAddr == n.Addr) {
+		return true
+	}
+	return false
 }
 
 func (n *Node) RequestVote(voteChan chan<- VoteReply) {
@@ -273,7 +281,7 @@ func (n *Node) SendHeartBeat() {
 func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	if (n.LeaderID != nil && n.LeaderAddr != nil) && (*n.LeaderID == n.NodeID && *n.LeaderAddr == n.Addr) {
+	if n.isLeader() {
 		reply.LeaderAddr = &n.Addr
 		reply.Peers = n.Peers
 		reply.Success = true
@@ -287,7 +295,7 @@ func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
 func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
-	if (n.LeaderID != nil && n.LeaderAddr != nil) && (*n.LeaderID == n.NodeID && *n.LeaderAddr == n.Addr) {
+	if n.isLeader() {
 		reply.LeaderID = &n.NodeID
 		reply.LeaderAddr = &n.Addr
 		reply.Success = true
@@ -308,6 +316,21 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 }
 
 func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if n.isLeader() {
+		if entry.Role != Learner {
+			return nil
+		}
+		if _, ok := n.NextIndex[entry.NodeAddr]; !ok {
+			n.NextIndex[entry.NodeAddr] = len(n.Log)
+			n.MatchIndex[entry.NodeAddr] = 0
+		}
+	} else {
+		reply.PossibleLeader = n.LeaderID
+		reply.PossibleLeaderAddr = n.LeaderAddr
+		reply.Success = false
+	}
 	return nil
 }
 
@@ -330,7 +353,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	}
 	defer client.Close()
 	n.Mu.RLock()
-	if n.State != Leader || n.LeaderID == nil {
+	if !n.isLeader() || n.LeaderID == nil {
 		n.Mu.RUnlock()
 		return
 	}
@@ -360,7 +383,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		n.ElectionTimer.Reset(RandomElectionTimeout())
 		return
 	}
-	if n.State != Leader || n.Term != entriesArgs.Term {
+	if !n.isLeader() || n.Term != entriesArgs.Term {
 		return
 	}
 	if appendReply.Success {

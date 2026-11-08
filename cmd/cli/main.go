@@ -116,7 +116,7 @@ func main() {
 			client := rpc.NewClient(conn)
 
 			var reply raft.AddServerReply
-			cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr}
+			cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr, Role: nodeReply.Role}
 			if err := client.Call("Node.AddServer", &cmd, &reply); err != nil {
 				slog.Error("RPC call failed", "target", currentPeer, "error", err)
 				continue
