@@ -19,6 +19,7 @@ const (
 	ElectionTimeout  = 150 * time.Millisecond
 	HeartBeatTimeout = 50 * time.Millisecond
 	Jitter           = 150
+	Rounds           = 3
 )
 
 func RandomElectionTimeout() time.Duration {
@@ -93,9 +94,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	FromID  int
-	Term    int
-	Success bool
+	FromID       int
+	Term         int
+	ConflictIdx  *int
+	ConflictTerm *int
+	Success      bool
 }
 
 type RequestVoteArgs struct {
@@ -121,6 +124,7 @@ type AddServerReply struct {
 	LeaderAddr         *string
 	PossibleLeader     *int
 	PossibleLeaderAddr *string
+	Expired            bool
 	Success            bool
 }
 type NodeRole string
@@ -292,6 +296,18 @@ func (n *Node) ExploreCommand(cmd *string, reply *ExploreCmdReply) error {
 	return nil
 }
 
+func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
+	n.Mu.RLock()
+	defer n.Mu.RUnlock()
+	reply.NodeID = n.NodeID
+	reply.Addr = n.Addr
+	reply.LeaderID = n.LeaderID
+	reply.LeaderAddr = n.LeaderAddr
+	reply.Peers = n.Peers
+	reply.Role = n.Role
+	return nil
+}
+
 func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
@@ -317,33 +333,109 @@ func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
 
 func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 	n.Mu.Lock()
-	defer n.Mu.Unlock()
-	if n.isLeader() {
-		if entry.Role != Learner {
-			return nil
-		}
-		if _, ok := n.NextIndex[entry.NodeAddr]; !ok {
-			n.NextIndex[entry.NodeAddr] = len(n.Log)
-			n.MatchIndex[entry.NodeAddr] = 0
-		}
-	} else {
-		reply.PossibleLeader = n.LeaderID
-		reply.PossibleLeaderAddr = n.LeaderAddr
-		reply.Success = false
+	reply.PossibleLeader = n.LeaderID
+	reply.PossibleLeaderAddr = n.LeaderAddr
+	reply.Success = false
+	if !n.isLeader() || entry.Role != Learner {
+		n.Mu.Unlock()
+		return nil
 	}
-	return nil
-}
-
-func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
-	n.Mu.RLock()
-	defer n.Mu.RUnlock()
-	reply.NodeID = n.NodeID
-	reply.Addr = n.Addr
-	reply.LeaderID = n.LeaderID
-	reply.LeaderAddr = n.LeaderAddr
-	reply.Peers = n.Peers
-	reply.Role = n.Role
-	return nil
+	lNodeAddr := entry.NodeAddr
+	if _, ok := n.NextIndex[lNodeAddr]; !ok {
+		n.NextIndex[lNodeAddr] = len(n.Log)
+		n.MatchIndex[lNodeAddr] = 0
+	}
+	n.Mu.Unlock()
+	timer := time.NewTimer(ElectionTimeout)
+	defer timer.Stop()
+	catchUpRounds := Rounds
+	for {
+		select {
+		case <-timer.C:
+			if catchUpRounds == 0 {
+				reply.Expired = true
+				return nil
+			}
+			catchUpRounds--
+			timer.Reset(ElectionTimeout)
+		default:
+			var appendReply AppendEntriesReply
+			n.Mu.Lock()
+			nextIdx := n.NextIndex[lNodeAddr]
+			entriesArgs := AppendEntriesArgs{
+				LeaderID:     *n.LeaderID,
+				LeaderAddr:   *n.LeaderAddr,
+				Term:         n.Term,
+				LeaderCommit: n.CommitIndex,
+				Entries:      n.Log[nextIdx:],
+				PrevLogIndex: nextIdx - 1,
+				PrevLogTerm:  n.Log[nextIdx-1].Term,
+			}
+			n.Mu.Unlock()
+			client, err := rpc.Dial("tcp", lNodeAddr)
+			if err != nil {
+				return nil
+			}
+			defer client.Close()
+			if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
+				slog.Error("RPC append entry call failed", "target", lNodeAddr, "error", err)
+				return nil
+			}
+			n.Mu.Lock()
+			if appendReply.Success {
+				matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
+				n.MatchIndex[lNodeAddr] = matchLogIdx
+				n.NextIndex[lNodeAddr] = matchLogIdx + 1
+				// Qourum check for commit
+				for i := len(n.Log) - 1; i > n.CommitIndex; i-- {
+					// 1. If terms dont match keep looping towards begining of the log
+					if n.Term != n.Log[i].Term {
+						continue
+					}
+					// 2. Count how many followers including leader matched or exceeded current index
+					count := 1
+					for _, matchIdx := range n.MatchIndex {
+						if matchIdx >= i {
+							count++
+						}
+						// 3. If quorum achieved break
+						if count > len(n.Peers)/2 {
+							n.CommitIndex = i
+							slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
+							n.ApplyCond.Signal()
+							break
+						}
+					}
+				}
+				reply.LeaderID = &n.NodeID
+				reply.LeaderAddr = &n.Addr
+				reply.Success = true
+				n.Mu.Unlock()
+				return nil
+				// Optimizations
+			} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm == nil {
+				n.NextIndex[lNodeAddr] = *appendReply.ConflictIdx
+			} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm != nil {
+				lastIdxTerm := -1
+				for i := len(n.Log) - 1; i >= 1; i-- {
+					if n.Log[i].Term == *appendReply.ConflictTerm {
+						lastIdxTerm = i
+						break
+					}
+				}
+				if lastIdxTerm != -1 {
+					n.NextIndex[lNodeAddr] = lastIdxTerm + 1
+				} else {
+					n.NextIndex[lNodeAddr] = *appendReply.ConflictIdx
+				}
+			} else {
+				if n.NextIndex[lNodeAddr] > 1 {
+					n.NextIndex[lNodeAddr]--
+				}
+			}
+			n.Mu.Unlock()
+		}
+	}
 }
 
 func (n *Node) ReplicateLog(peerID int, peerAddr string) {
@@ -455,7 +547,22 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.ElectionTimer.Reset(RandomElectionTimeout())
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if entry.PrevLogIndex >= len(n.Log) || entry.PrevLogTerm != n.Log[entry.PrevLogIndex].Term {
+	// Optimization to avoid trying every index if follower or learner (new added node that is most likely empty) log is empty
+	if entry.PrevLogIndex >= len(n.Log) {
+		lastIdx := len(n.Log)
+		reply.ConflictIdx = &lastIdx
+		reply.ConflictTerm = nil
+		return nil
+	}
+	// Optimization to avoid trying all indexes if we know that log length is less or equal but terms or off
+	if entry.PrevLogTerm != n.Log[entry.PrevLogIndex].Term {
+		conflictIdx := entry.PrevLogIndex
+		conflictTerm := n.Log[entry.PrevLogIndex].Term
+		for conflictIdx > 0 && n.Log[conflictIdx-1].Term == conflictTerm {
+			conflictIdx--
+		}
+		reply.ConflictIdx = &conflictIdx
+		reply.ConflictTerm = &conflictTerm
 		return nil
 	}
 	for idx, currentEntry := range entry.Entries {
