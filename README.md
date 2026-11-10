@@ -25,7 +25,12 @@ It also has **leader discovery** for the client:
 - If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
 - Each node is tried at most once. If none of them is the leader, the client gives up.
 
-Not implemented yet: election restriction and persistence.
+It also supports **adding a server** to a running cluster (section 6):
+
+- `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
+- It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
+- The leader catches the new node's log up before adding it to the cluster. If that takes too long, the request expires and the client reports it so you can try again.
+
 
 ## Running
 
@@ -40,10 +45,8 @@ In another terminal, run the CLI client:
 ```sh
 podman compose run --rm cli-client set x=10
 ```
-```
-```
 
-Add new node:
+Add a new node. First start its container:
 
 ```sh
 podman run -d \
@@ -57,6 +60,20 @@ podman run -d \
   ./raft-node
 ```
 
+Then tell the cluster about it with the CLI `add` command:
+
+```sh
+podman compose run --rm cli-client add node6:50051
+```
+
+Check it logs with:
+
+```sh
+podman logs node6
+```
+
+```
+```
 ### Testing re-election
 
 You can take nodes down while the cluster is running and watch a new leader get elected. In another terminal:
@@ -77,4 +94,4 @@ The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down
 
 Planned features:
 - log compaction (section 7)
-- cluster membership changes (section 6)
+- cluster membership changes (section 6): adding servers is done, removing servers is not
