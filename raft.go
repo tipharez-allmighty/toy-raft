@@ -426,18 +426,22 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 					cmd := LogCmd{Cmd: AddCmd, Val: lNodeAddr, NodeID: &entry.NodeID}
 					if err := n.ExecuteCommand(&cmd, &execReply); err != nil {
 						slog.Error("ADD command failed", "new_node", lNodeAddr, "error", err)
+						return nil
 					}
 					if execReply.Success {
+						n.Mu.RLock()
 						for n.CommitIndex < *execReply.LastLogIdx {
 							ch := n.CommitCh
-							n.Mu.Unlock()
+							n.Mu.RUnlock()
 							select {
 							case <-ch:
+								n.Mu.RLock()
 							case <-timer.C:
 								reply.Expired = true
 								return nil
 							}
 						}
+						n.Mu.RUnlock()
 						cmdPromote := "promoteVoter"
 						if err := client.Call("Node.PromoteVoter", &cmdPromote, &PromoteVoterReply{}); err != nil {
 							slog.Error("RPC promote to voter call failed", "target", lNodeAddr, "error", err)
@@ -548,7 +552,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 					latestCluster := n.Log[i].VoterCluster
 					delete(latestCluster, n.NodeID)
 					n.Peers = latestCluster
-					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
+					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex)
 					close(n.CommitCh)
 					n.CommitCh = make(chan struct{})
 					break
@@ -693,11 +697,11 @@ func MustLoadNode() *Node {
 		StateMachine:  StateMachine{State: make(map[string]string)},
 		Term:          0,
 		Addr:          addr,
-		Log:           []LogEntry{{}},
 		Peers:         peersMap,
 		CommitCh:      make(chan struct{}),
 		ElectionTimer: time.NewTimer(RandomElectionTimeout()),
 	}
+	node.Log = append(node.Log, LogEntry{VoterCluster: node.voterCluster()})
 	go node.ApplyLogWorker()
 	return &node
 }
