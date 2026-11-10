@@ -117,14 +117,33 @@ func main() {
 
 			var reply raft.AddServerReply
 			cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr, Role: nodeReply.Role}
-			if err := client.Call("Node.AddServer", &cmd, &reply); err != nil {
+			err = client.Call("Node.AddServer", &cmd, &reply)
+			client.Close()
+			if err != nil {
 				slog.Error("RPC call failed", "target", currentPeer, "error", err)
 				continue
 			}
-			client.Close()
+			if reply.Success {
+				slog.Info("Client successfully added node to the cluster", "node", nodeReply.Addr)
+				return
+			} else if !reply.Success && reply.Expired {
+				slog.Warn("Node addition process exipred, need another try", "node", nodeReply.Addr)
+				return
+			} else if !reply.Success && (reply.PossibleLeader != nil && reply.PossibleLeaderAddr != nil) {
+				if !visited[*reply.PossibleLeaderAddr] {
+					peersList = append(peersList, *reply.PossibleLeaderAddr)
+					slog.Info("Leader is not found trying possible one", "possible_leader", *reply.PossibleLeaderAddr)
+				} else {
+					slog.Info("Possible leader already visited, trying next node", "possible_leader", *reply.PossibleLeaderAddr)
+				}
+			} else if !reply.Success && reply.PossibleLeader == nil && !reply.Expired {
+				slog.Info("Leader is not found trying next node")
+			} else {
+				slog.Error("Invalid response from the node", "reply", reply)
+				os.Exit(1)
+			}
 		}
 		return
-
 	}
 	peersList := raft.MustLoadPeers()
 	rand.Shuffle(len(peersList), func(i, j int) {
@@ -149,15 +168,16 @@ func main() {
 		client := rpc.NewClient(conn)
 
 		var reply raft.ExecCmdReply
-		cmd := strings.ToUpper(fmt.Sprintf("%v %v", os.Args[1], os.Args[2]))
-		if err := client.Call("Node.ExecuteCommand", &cmd, &reply); err != nil {
+		cmd := raft.LogCmd{Cmd: os.Args[1], Val: os.Args[2]}
+		err = client.Call("Node.ExecuteCommand", &cmd, &reply)
+		client.Close()
+		if err != nil {
 			slog.Error("RPC call failed", "target", currentPeer, "error", err)
 			continue
 		}
-		client.Close()
 
 		if reply.Success && (reply.LeaderID != nil && reply.LeaderAddr != nil) {
-			slog.Info("Client successfully found a leader and got his command got executed", "leader", *reply.LeaderAddr, "Command", cmd)
+			slog.Info("Client successfully found a leader and got his command got executed", "leader", *reply.LeaderAddr, "Command", fmt.Sprintf("%+v", cmd))
 			return
 		} else if !reply.Success && (reply.PossibleLeader != nil && reply.PossibleLeaderAddr != nil) {
 			if !visited[*reply.PossibleLeaderAddr] {

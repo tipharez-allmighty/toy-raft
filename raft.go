@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"net/rpc"
 	"os"
@@ -31,6 +32,8 @@ type ExecCmdReply struct {
 	LeaderAddr         *string
 	PossibleLeader     *int
 	PossibleLeaderAddr *string
+	LastLogIdx         *int
+	Busy               bool
 	Success            bool
 }
 
@@ -48,6 +51,10 @@ type GetNodeCmdReply struct {
 	Role       NodeRole
 	Addr       string
 	Peers      map[int]string
+}
+
+type PromoteVoterReply struct {
+	Success bool
 }
 
 const (
@@ -78,9 +85,15 @@ func IsValidCmd(cmd, val string) bool {
 	}
 }
 
+type LogCmd struct {
+	Cmd    string
+	Val    string
+	NodeID *int
+}
 type LogEntry struct {
-	Term    int
-	Command string
+	Term         int
+	Command      LogCmd
+	VoterCluster map[int]string
 }
 
 type AppendEntriesArgs struct {
@@ -156,16 +169,12 @@ type StateMachine struct {
 	Mu    sync.Mutex
 }
 
-func (sm *StateMachine) Apply(cmd string) error {
+func (sm *StateMachine) Apply(cmd LogCmd) error {
 	sm.Mu.Lock()
 	defer sm.Mu.Unlock()
-	opKey, val, found := strings.Cut(cmd, "=")
+	key, val, found := strings.Cut(cmd.Val, "=")
 	if !found {
 		return fmt.Errorf("state machine failed to parse command: %v", cmd)
-	}
-	_, key, found := strings.Cut(opKey, " ")
-	if !found {
-		return fmt.Errorf("state machine faield to parse commands key value pair: %v", cmd)
 	}
 	sm.State[key] = val
 	slog.Info("New command was applied to the state machine", "command", cmd, "current_state", sm.State)
@@ -190,7 +199,7 @@ type Node struct {
 	MatchIndex    map[string]int
 	ElectionTimer *time.Timer
 	Mu            sync.RWMutex
-	ApplyCond     *sync.Cond
+	CommitCh      chan struct{}
 }
 
 func (n *Node) isLeader() bool {
@@ -198,6 +207,22 @@ func (n *Node) isLeader() bool {
 		return true
 	}
 	return false
+}
+
+func (n *Node) hasPendingChange() bool {
+	for i := n.CommitIndex + 1; i < len(n.Log); i++ {
+		if n.Log[i].Command.Cmd == AddCmd {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *Node) voterCluster() map[int]string {
+	currentCluster := make(map[int]string, len(n.Peers)+1)
+	maps.Copy(currentCluster, n.Peers)
+	currentCluster[n.NodeID] = n.Addr
+	return currentCluster
 }
 
 func (n *Node) RequestVote(voteChan chan<- VoteReply) {
@@ -308,14 +333,23 @@ func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
 	return nil
 }
 
-func (n *Node) ExecuteCommand(cmd *string, reply *ExecCmdReply) error {
+func (n *Node) ExecuteCommand(cmd *LogCmd, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	if n.isLeader() {
+		if cmd.Cmd == AddCmd && n.hasPendingChange() {
+			reply.Busy = true
+			reply.Success = false
+			return nil
+		} else if cmd.Cmd == AddCmd && cmd.NodeID != nil {
+			n.Peers[*cmd.NodeID] = cmd.Val
+		}
 		reply.LeaderID = &n.NodeID
 		reply.LeaderAddr = &n.Addr
 		reply.Success = true
-		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd})
+		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd, VoterCluster: n.voterCluster()})
+		lastLogIdx := len(n.Log) - 1
+		reply.LastLogIdx = &lastLogIdx
 		for peerID, peerAddr := range n.Peers {
 			if peerAddr == n.Addr {
 				continue
@@ -386,32 +420,38 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 				matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
 				n.MatchIndex[lNodeAddr] = matchLogIdx
 				n.NextIndex[lNodeAddr] = matchLogIdx + 1
-				// Qourum check for commit
-				for i := len(n.Log) - 1; i > n.CommitIndex; i-- {
-					// 1. If terms dont match keep looping towards begining of the log
-					if n.Term != n.Log[i].Term {
-						continue
+				if matchLogIdx == len(n.Log)-1 {
+					n.Mu.Unlock()
+					var execReply ExecCmdReply
+					cmd := LogCmd{Cmd: AddCmd, Val: lNodeAddr, NodeID: &entry.NodeID}
+					if err := n.ExecuteCommand(&cmd, &execReply); err != nil {
+						slog.Error("ADD command failed", "new_node", lNodeAddr, "error", err)
 					}
-					// 2. Count how many followers including leader matched or exceeded current index
-					count := 1
-					for _, matchIdx := range n.MatchIndex {
-						if matchIdx >= i {
-							count++
+					if execReply.Success {
+						for n.CommitIndex < *execReply.LastLogIdx {
+							ch := n.CommitCh
+							n.Mu.Unlock()
+							select {
+							case <-ch:
+							case <-timer.C:
+								reply.Expired = true
+								return nil
+							}
 						}
-						// 3. If quorum achieved break
-						if count > len(n.Peers)/2 {
-							n.CommitIndex = i
-							slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
-							n.ApplyCond.Signal()
-							break
+						cmdPromote := "promoteVoter"
+						if err := client.Call("Node.PromoteVoter", &cmdPromote, &PromoteVoterReply{}); err != nil {
+							slog.Error("RPC promote to voter call failed", "target", lNodeAddr, "error", err)
 						}
+					} else {
+						slog.Error("ADD command failed to execute", "new_node", lNodeAddr)
 					}
+					n.Mu.RLock()
+					reply.LeaderID = &n.NodeID
+					reply.LeaderAddr = &n.Addr
+					reply.Success = true
+					n.Mu.RUnlock()
+					return nil
 				}
-				reply.LeaderID = &n.NodeID
-				reply.LeaderAddr = &n.Addr
-				reply.Success = true
-				n.Mu.Unlock()
-				return nil
 				// Optimizations
 			} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm == nil {
 				n.NextIndex[lNodeAddr] = *appendReply.ConflictIdx
@@ -436,6 +476,14 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 			n.Mu.Unlock()
 		}
 	}
+}
+
+func (n *Node) PromoteVoter(cmd *string, reply *PromoteVoterReply) error {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	n.Role = Voter
+	reply.Success = true
+	return nil
 }
 
 func (n *Node) ReplicateLog(peerID int, peerAddr string) {
@@ -497,8 +545,12 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 				// 3. If quorum achieved break
 				if count > len(n.Peers)/2 {
 					n.CommitIndex = i
+					latestCluster := n.Log[i].VoterCluster
+					delete(latestCluster, n.NodeID)
+					n.Peers = latestCluster
 					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex, "commited_log", n.Log[:n.CommitIndex+1])
-					n.ApplyCond.Signal()
+					close(n.CommitCh)
+					n.CommitCh = make(chan struct{})
 					break
 				}
 			}
@@ -514,11 +566,18 @@ func (n *Node) ApplyLogWorker() {
 	for {
 		n.Mu.Lock()
 		for n.CommitIndex <= n.LastApplied {
-			n.ApplyCond.Wait()
+			ch := n.CommitCh
+			n.Mu.Unlock()
+			<-ch
+			n.Mu.Lock()
 		}
 		n.LastApplied++
 		entry := n.Log[n.LastApplied]
 		n.Mu.Unlock()
+		if entry.Command.Cmd != SetCmd {
+			slog.Debug("Worker detected cluster change cmd, skipping applying command to state machine", "node", n.NodeID)
+			continue
+		}
 		if err := n.StateMachine.Apply(entry.Command); err != nil {
 			slog.Error("Worker received error while applaying entry command to state machine", "node", n.NodeID, "error", err)
 			return
@@ -584,7 +643,8 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	newCommitIdx := min(entry.LeaderCommit, entry.PrevLogIndex+len(entry.Entries))
 	if newCommitIdx > n.CommitIndex {
 		n.CommitIndex = newCommitIdx
-		n.ApplyCond.Signal()
+		close(n.CommitCh)
+		n.CommitCh = make(chan struct{})
 	}
 	reply.Success = true
 	return nil
@@ -635,9 +695,9 @@ func MustLoadNode() *Node {
 		Addr:          addr,
 		Log:           []LogEntry{{}},
 		Peers:         peersMap,
+		CommitCh:      make(chan struct{}),
 		ElectionTimer: time.NewTimer(RandomElectionTimeout()),
 	}
-	node.ApplyCond = sync.NewCond(&node.Mu)
 	go node.ApplyLogWorker()
 	return &node
 }
