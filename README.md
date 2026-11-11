@@ -17,6 +17,12 @@ So far it covers **leader election** (section 5.2 of the paper):
 - **Commit:** once an entry is stored on a majority of nodes, the leader advances its commit index and followers pick it up from the next `AppendEntries`.
 - **State machine:** a key-value store (`map[string]string`). A background worker applies committed entries in order, so `set x=10` sets `x` to `10`.
 - **Election restriction**: voter denies its vote if its own log is more up-to-date than that of the candidate.
+- **Membership changes**: adding and removing servers in a running cluster (single-server change from Ch. 4 of the Dissertation):
+  - `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
+  - It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
+  - The leader catches the new node's log up before adding it to the cluster. If that takes too long, the request expires and the client reports it so you can try again.
+  - `raft-cli remove <address:port>` works the same way: it looks the node up with `GetNode`, then sends `RemoveServer` to the leader, which commits the removal to the log.
+  - Only one membership change can be in progress at a time.
 
 It also has **leader discovery** for the client:
 
@@ -25,13 +31,6 @@ It also has **leader discovery** for the client:
 - If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
 - Each node is tried at most once. If none of them is the leader, the client gives up.
 
-It also supports **adding and removing servers** in a running cluster (Single-server change from Ch. 4 of Dissertation):
-
-- `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
-- It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
-- The leader catches the new node's log up before adding it to the cluster. If that takes too long, the request expires and the client reports it so you can try again.
-- `raft-cli remove <address:port>` works the same way: it looks the node up with `GetNode`, then sends `RemoveServer` to the leader, which commits the removal to the log.
-- Only one membership change can be in progress at a time.
 
 
 ## CLI commands
