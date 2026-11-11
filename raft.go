@@ -218,6 +218,30 @@ func (n *Node) hasPendingChange() bool {
 	return false
 }
 
+// Optimizations so we dont check all indexes one by one if we can guess where next index should be (see AppendEntry method).
+func (n *Node) nextIndexGuess(addr string, appendReply AppendEntriesReply) {
+	if appendReply.ConflictIdx != nil && appendReply.ConflictTerm == nil {
+		n.NextIndex[addr] = *appendReply.ConflictIdx
+	} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm != nil {
+		lastIdxTerm := -1
+		for i := len(n.Log) - 1; i >= 1; i-- {
+			if n.Log[i].Term == *appendReply.ConflictTerm {
+				lastIdxTerm = i
+				break
+			}
+		}
+		if lastIdxTerm != -1 {
+			n.NextIndex[addr] = lastIdxTerm + 1
+		} else {
+			n.NextIndex[addr] = *appendReply.ConflictIdx
+		}
+	} else {
+		if n.NextIndex[addr] > 1 {
+			n.NextIndex[addr]--
+		}
+	}
+}
+
 func (n *Node) voterCluster() map[int]string {
 	currentCluster := make(map[int]string, len(n.Peers)+1)
 	maps.Copy(currentCluster, n.Peers)
@@ -456,26 +480,8 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 					n.Mu.RUnlock()
 					return nil
 				}
-				// Optimizations
-			} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm == nil {
-				n.NextIndex[lNodeAddr] = *appendReply.ConflictIdx
-			} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm != nil {
-				lastIdxTerm := -1
-				for i := len(n.Log) - 1; i >= 1; i-- {
-					if n.Log[i].Term == *appendReply.ConflictTerm {
-						lastIdxTerm = i
-						break
-					}
-				}
-				if lastIdxTerm != -1 {
-					n.NextIndex[lNodeAddr] = lastIdxTerm + 1
-				} else {
-					n.NextIndex[lNodeAddr] = *appendReply.ConflictIdx
-				}
 			} else {
-				if n.NextIndex[lNodeAddr] > 1 {
-					n.NextIndex[lNodeAddr]--
-				}
+				n.nextIndexGuess(lNodeAddr, appendReply)
 			}
 			n.Mu.Unlock()
 		}
@@ -549,7 +555,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 				// 3. If quorum achieved break
 				if count > len(n.Peers)/2 {
 					n.CommitIndex = i
-					latestCluster := n.Log[i].VoterCluster
+					latestCluster := maps.Clone(n.Log[i].VoterCluster)
 					delete(latestCluster, n.NodeID)
 					n.Peers = latestCluster
 					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex)
@@ -560,9 +566,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 			}
 		}
 	} else {
-		if n.NextIndex[peerAddr] > 1 {
-			n.NextIndex[peerAddr]--
-		}
+		n.nextIndexGuess(peerAddr, appendReply)
 	}
 }
 
