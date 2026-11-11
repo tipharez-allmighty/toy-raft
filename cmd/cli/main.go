@@ -74,7 +74,7 @@ func main() {
 	}
 
 	if len(os.Args) < 3 || !raft.IsValidCmd(os.Args[1], os.Args[2]) {
-		slog.Error("usage: raft-cli set x=? or raft-cli add address:port", "args", os.Args)
+		slog.Error("usage: raft-cli set x=? or raft-cli add/remove address:port or explore", "args", os.Args)
 		return
 	}
 	if os.Args[1] == raft.AddCmd || os.Args[1] == raft.RemoveCmd {

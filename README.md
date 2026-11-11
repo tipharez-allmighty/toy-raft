@@ -25,12 +25,25 @@ It also has **leader discovery** for the client:
 - If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
 - Each node is tried at most once. If none of them is the leader, the client gives up.
 
-It also supports **adding a server** to a running cluster (section 6):
+It also supports **adding and removing servers** in a running cluster (section 6):
 
 - `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
 - It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
 - The leader catches the new node's log up before adding it to the cluster. If that takes too long, the request expires and the client reports it so you can try again.
+- `raft-cli remove <address:port>` works the same way: it looks the node up with `GetNode`, then sends `RemoveServer` to the leader, which commits the removal to the log.
+- Only one membership change can be in progress at a time.
 
+
+## CLI commands
+
+| Command | What it does |
+| --- | --- |
+| `raft-cli set x=10` | Sets key `x` to `10` in the replicated key-value store |
+| `raft-cli add <address:port>` | Adds a running node to the cluster |
+| `raft-cli remove <address:port>` | Removes a node from the cluster |
+| `raft-cli explore` | Finds the current leader and prints the cluster's peers |
+
+Run them through compose: `podman compose run --rm cli-client <command>`.
 
 ## Running
 
@@ -66,14 +79,27 @@ Then tell the cluster about it with the CLI `add` command:
 podman compose run --rm cli-client add node6:50051
 ```
 
-Check it logs with:
+Remove a node from the cluster:
+
+```sh
+podman compose run --rm cli-client remove node6:50051
+```
+
+Find the leader and list the cluster's peers:
+
+```sh
+podman compose run --rm cli-client explore
+```
+
+### Checking logs
+
+Each node runs in its own container, so you can check the logs of an individual node with `podman logs <name>` (add `-f` to follow them live):
 
 ```sh
 podman logs node6
+podman logs -f node1
 ```
 
-```
-```
 ### Testing re-election
 
 You can take nodes down while the cluster is running and watch a new leader get elected. In another terminal:
@@ -91,7 +117,6 @@ Find the current leader in the logs (`Leader has been elected`) and pause it. Wi
 The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down two nodes and still have a leader. With three nodes down, elections keep failing until a node comes back.
 
 ## Status
-
 Planned features:
 - log compaction (section 7)
-- cluster membership changes (section 6): adding servers is done, removing servers is not
+
