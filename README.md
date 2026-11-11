@@ -1,7 +1,7 @@
 # toy-raft
 
 A toy implementation of the Raft consensus algorithm in Go, based on the
-[Raft paper](https://raft.github.io/raft.pdf).
+[Raft paper](https://raft.github.io/raft.pdf) and [Diego Ongaro dissertation](https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)
 
 ## What's implemented
 
@@ -25,7 +25,7 @@ It also has **leader discovery** for the client:
 - If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
 - Each node is tried at most once. If none of them is the leader, the client gives up.
 
-It also supports **adding and removing servers** in a running cluster (section 6):
+It also supports **adding and removing servers** in a running cluster (Single-server change from Ch. 4 of Dissertation):
 
 - `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
 - It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
