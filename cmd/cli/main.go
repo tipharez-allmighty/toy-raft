@@ -77,7 +77,7 @@ func main() {
 		slog.Error("usage: raft-cli set x=? or raft-cli add address:port", "args", os.Args)
 		return
 	}
-	if os.Args[1] == raft.AddCmd {
+	if os.Args[1] == raft.AddCmd || os.Args[1] == raft.RemoveCmd {
 		conn, err := net.Dial("tcp", os.Args[2])
 		if err != nil {
 			slog.Error("Failed to dial peer", "peer", os.Args[2], "error", err)
@@ -106,7 +106,6 @@ func main() {
 				continue
 			}
 			visited[currentPeer] = true
-			slog.Info("Sending Add server command", "node", nodeReply.NodeID, "peer", currentPeer)
 			conn, err := net.Dial("tcp", currentPeer)
 			if err != nil {
 				slog.Error("Failed to dial peer", "peer", currentPeer, "error", err)
@@ -115,19 +114,27 @@ func main() {
 			conn.SetDeadline(time.Now().Add(2 * time.Second))
 			client := rpc.NewClient(conn)
 
-			var reply raft.AddServerReply
-			cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr, Role: nodeReply.Role}
-			err = client.Call("Node.AddServer", &cmd, &reply)
+			var reply raft.ServerReply
+			switch os.Args[1] {
+			case raft.AddCmd:
+				slog.Info("Sending Add server command", "node", nodeReply.NodeID, "peer", currentPeer)
+				cmd := raft.AddServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr, Role: nodeReply.Role}
+				err = client.Call("Node.AddServer", &cmd, &reply)
+			case raft.RemoveCmd:
+				slog.Info("Sending Remove server command", "node", nodeReply.NodeID, "peer", currentPeer)
+				cmd := raft.ServerArgs{NodeID: nodeReply.NodeID, NodeAddr: nodeReply.Addr}
+				err = client.Call("Node.RemoveServer", &cmd, &reply)
+			}
 			client.Close()
 			if err != nil {
 				slog.Error("RPC call failed", "target", currentPeer, "error", err)
 				continue
 			}
 			if reply.Success {
-				slog.Info("Client successfully added node to the cluster", "node", nodeReply.Addr)
+				slog.Info("Client successfully changed cluster membership", "command", os.Args[1], "node", nodeReply.Addr)
 				return
 			} else if !reply.Success && reply.Expired {
-				slog.Warn("Node addition process exipred, need another try", "node", nodeReply.Addr)
+				slog.Warn("Membership change process exipred, need another try", "node", nodeReply.Addr)
 				return
 			} else if !reply.Success && (reply.PossibleLeader != nil && reply.PossibleLeaderAddr != nil) {
 				if !visited[*reply.PossibleLeaderAddr] {

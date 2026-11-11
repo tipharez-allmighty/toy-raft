@@ -53,7 +53,7 @@ type GetNodeCmdReply struct {
 	Peers      map[int]string
 }
 
-type PromoteVoterReply struct {
+type BaseReply struct {
 	Success bool
 }
 
@@ -72,14 +72,12 @@ func IsValidCmd(cmd, val string) bool {
 			return false
 		}
 		return true
-	case AddCmd:
+	case AddCmd, RemoveCmd:
 		node, addr, found := strings.Cut(val, ":")
 		if !found || node == "" || addr == "" {
 			return false
 		}
 		return true
-	case RemoveCmd:
-		return false
 	default:
 		return false
 	}
@@ -126,20 +124,24 @@ type VoteReply struct {
 	VoteGranted bool
 }
 
-type AddServerArgs struct {
+type ServerArgs struct {
 	NodeID   int
 	NodeAddr string
-	Role     NodeRole
 }
 
-type AddServerReply struct {
+type ServerReply struct {
 	LeaderID           *int
 	LeaderAddr         *string
 	PossibleLeader     *int
 	PossibleLeaderAddr *string
-	Expired            bool
 	Success            bool
+	Expired            bool
 }
+type AddServerArgs struct {
+	ServerArgs
+	Role NodeRole
+}
+
 type NodeRole string
 
 const (
@@ -361,17 +363,21 @@ func (n *Node) ExecuteCommand(cmd *LogCmd, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	if n.isLeader() {
-		if cmd.Cmd == AddCmd && n.hasPendingChange() {
+		if (cmd.Cmd == AddCmd || cmd.Cmd == RemoveCmd) && n.hasPendingChange() {
 			reply.Busy = true
 			reply.Success = false
 			return nil
 		} else if cmd.Cmd == AddCmd && cmd.NodeID != nil {
 			n.Peers[*cmd.NodeID] = cmd.Val
 		}
+		voterCluster := n.voterCluster()
+		if cmd.Cmd == RemoveCmd && cmd.NodeID != nil {
+			delete(voterCluster, *cmd.NodeID)
+		}
 		reply.LeaderID = &n.NodeID
 		reply.LeaderAddr = &n.Addr
 		reply.Success = true
-		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd, VoterCluster: n.voterCluster()})
+		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd, VoterCluster: voterCluster})
 		lastLogIdx := len(n.Log) - 1
 		reply.LastLogIdx = &lastLogIdx
 		for peerID, peerAddr := range n.Peers {
@@ -389,7 +395,7 @@ func (n *Node) ExecuteCommand(cmd *LogCmd, reply *ExecCmdReply) error {
 	return nil
 }
 
-func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
+func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 	n.Mu.Lock()
 	reply.PossibleLeader = n.LeaderID
 	reply.PossibleLeaderAddr = n.LeaderAddr
@@ -467,11 +473,11 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 						}
 						n.Mu.RUnlock()
 						cmdPromote := "promoteVoter"
-						if err := client.Call("Node.PromoteVoter", &cmdPromote, &PromoteVoterReply{}); err != nil {
+						if err := client.Call("Node.PromoteVoter", &cmdPromote, &BaseReply{}); err != nil {
 							slog.Error("RPC promote to voter call failed", "target", lNodeAddr, "error", err)
 						}
 					} else {
-						slog.Error("ADD command failed to execute", "new_node", lNodeAddr)
+						slog.Error("Add command failed to execute", "new_node", lNodeAddr)
 					}
 					n.Mu.RLock()
 					reply.LeaderID = &n.NodeID
@@ -488,11 +494,62 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *AddServerReply) error {
 	}
 }
 
-func (n *Node) PromoteVoter(cmd *string, reply *PromoteVoterReply) error {
+func (n *Node) PromoteVoter(cmd *string, reply *BaseReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	n.Role = Voter
 	reply.Success = true
+	return nil
+}
+
+func (n *Node) RemoveServer(entry *ServerArgs, reply *ServerReply) error {
+	n.Mu.Lock()
+	reply.PossibleLeader = n.LeaderID
+	reply.PossibleLeaderAddr = n.LeaderAddr
+	reply.Success = false
+	if !n.isLeader() {
+		n.Mu.Unlock()
+		return nil
+	}
+
+	var execReply ExecCmdReply
+	cmd := LogCmd{Cmd: RemoveCmd, Val: entry.NodeAddr, NodeID: &entry.NodeID}
+	n.Mu.Unlock()
+	if err := n.ExecuteCommand(&cmd, &execReply); err != nil {
+		slog.Error("Remove command failed", "node_to_remove", entry.NodeAddr, "error", err)
+		return nil
+	}
+	if execReply.Success {
+		timer := time.NewTimer(ElectionTimeout)
+		defer timer.Stop()
+		n.Mu.RLock()
+		for n.CommitIndex < *execReply.LastLogIdx {
+			ch := n.CommitCh
+			n.Mu.RUnlock()
+			select {
+			case <-ch:
+				reply.Success = true
+				n.Mu.RLock()
+			case <-timer.C:
+				reply.Expired = true
+				return nil
+			}
+		}
+		n.Mu.RUnlock()
+		n.Mu.Lock()
+		reply.LeaderID = &n.NodeID
+		reply.LeaderAddr = &n.Addr
+		if n.NodeID == entry.NodeID {
+			n.State = Follower
+			n.Role = Learner
+			reply.LeaderID = nil
+			reply.LeaderAddr = nil
+		}
+		delete(n.Peers, entry.NodeID)
+
+		reply.Success = true
+		n.Mu.Unlock()
+	}
 	return nil
 }
 
