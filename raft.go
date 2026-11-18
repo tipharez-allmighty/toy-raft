@@ -2,6 +2,8 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +23,9 @@ const (
 	HeartBeatTimeout = 50 * time.Millisecond
 	Jitter           = 150
 	Rounds           = 3
+	// Snapshot
+	SnapshotThreshold = 5
+	ChunkSize         = 10 // bytes
 )
 
 func RandomElectionTimeout() time.Duration {
@@ -124,6 +129,20 @@ type VoteReply struct {
 	VoteGranted bool
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderID          int
+	LeaderAddr        string
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	LastCluster       map[int]string
+	Data              []byte
+	Offset            int
+	Done              bool
+}
+type InstallSnapshotReply struct {
+	Term int
+}
 type ServerArgs struct {
 	NodeID   int
 	NodeAddr string
@@ -166,42 +185,43 @@ const (
 	Leader    NodeState = "leader"
 )
 
-type StateMachine struct {
-	State map[string]string
-	Mu    sync.Mutex
+type SnapshotBuffer struct {
+	offset int
+	buf    []byte
 }
-
-func (sm *StateMachine) Apply(cmd LogCmd) error {
-	sm.Mu.Lock()
-	defer sm.Mu.Unlock()
-	key, val, found := strings.Cut(cmd.Val, "=")
-	if !found {
-		return fmt.Errorf("state machine failed to parse command: %v", cmd)
-	}
-	sm.State[key] = val
-	slog.Info("New command was applied to the state machine", "command", cmd, "current_state", sm.State)
-	return nil
+type Snapshot struct {
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	LastCluster       map[int]string
+	Data              []byte
+	buffer            SnapshotBuffer
+}
+type StateMachine struct {
+	State    map[string]string
+	Snapshot Snapshot
 }
 
 type Node struct {
-	NodeID        int
-	LeaderID      *int
-	LeaderAddr    *string
-	Role          NodeRole
-	State         NodeState
-	StateMachine  StateMachine
-	Term          int
-	VotedFor      *int
-	Addr          string
-	CommitIndex   int
-	LastApplied   int
-	Log           []LogEntry
-	Peers         map[int]string
-	NextIndex     map[string]int
-	MatchIndex    map[string]int
-	ElectionTimer *time.Timer
-	Mu            sync.RWMutex
-	CommitCh      chan struct{}
+	NodeID           int
+	LeaderID         *int
+	LeaderAddr       *string
+	Role             NodeRole
+	State            NodeState
+	StateMachine     StateMachine
+	Term             int
+	VotedFor         *int
+	Addr             string
+	CommitIndex      int
+	LastApplied      int
+	Log              []LogEntry
+	LogStart         int
+	Peers            map[int]string
+	NextIndex        map[string]int
+	MatchIndex       map[string]int
+	SnapshotProgress map[string]struct{}
+	ElectionTimer    *time.Timer
+	Mu               sync.RWMutex
+	CommitCh         chan struct{}
 }
 
 func (n *Node) isLeader() bool {
@@ -211,9 +231,17 @@ func (n *Node) isLeader() bool {
 	return false
 }
 
+func (n *Node) entryAt(idx int) LogEntry {
+	return n.Log[idx-n.LogStart]
+}
+
+func (n *Node) lastLogIdx() int {
+	return n.LogStart + len(n.Log) - 1
+}
+
 func (n *Node) hasPendingChange() bool {
-	for i := n.CommitIndex + 1; i < len(n.Log); i++ {
-		if n.Log[i].Command.Cmd == AddCmd {
+	for i := n.CommitIndex + 1; i <= n.lastLogIdx(); i++ {
+		if n.entryAt(i).Command.Cmd == AddCmd {
 			return true
 		}
 	}
@@ -226,8 +254,8 @@ func (n *Node) nextIndexGuess(addr string, appendReply AppendEntriesReply) {
 		n.NextIndex[addr] = *appendReply.ConflictIdx
 	} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm != nil {
 		lastIdxTerm := -1
-		for i := len(n.Log) - 1; i >= 1; i-- {
-			if n.Log[i].Term == *appendReply.ConflictTerm {
+		for i := n.lastLogIdx(); i > n.LogStart; i-- {
+			if n.entryAt(i).Term == *appendReply.ConflictTerm {
 				lastIdxTerm = i
 				break
 			}
@@ -267,8 +295,8 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 
 			var voteReply VoteReply
 			n.Mu.RLock()
-			lastLogIdx := len(n.Log) - 1
-			lastLogTerm := n.Log[lastLogIdx].Term
+			lastLogIdx := n.lastLogIdx()
+			lastLogTerm := n.entryAt(lastLogIdx).Term
 			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term, LastLogIndex: lastLogIdx, LastLogTerm: lastLogTerm}
 			n.Mu.RUnlock()
 			if err := client.Call("Node.GiveVote", &candidate, &voteReply); err != nil {
@@ -307,8 +335,8 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 	}
 	// if candidates log term is lower then nodes, or the terms are equal but index is lower then nodes,
 	// say NO.
-	lastLogIdx := len(n.Log) - 1
-	lastLogTerm := n.Log[lastLogIdx].Term
+	lastLogIdx := n.lastLogIdx()
+	lastLogTerm := n.entryAt(lastLogIdx).Term
 	if candidate.LastLogTerm < lastLogTerm || (candidate.LastLogTerm == lastLogTerm && candidate.LastLogIndex < lastLogIdx) {
 		return nil
 	}
@@ -378,7 +406,7 @@ func (n *Node) ExecuteCommand(cmd *LogCmd, reply *ExecCmdReply) error {
 		reply.LeaderAddr = &n.Addr
 		reply.Success = true
 		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd, VoterCluster: voterCluster})
-		lastLogIdx := len(n.Log) - 1
+		lastLogIdx := n.lastLogIdx()
 		reply.LastLogIdx = &lastLogIdx
 		for peerID, peerAddr := range n.Peers {
 			if peerAddr == n.Addr {
@@ -406,7 +434,7 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 	}
 	lNodeAddr := entry.NodeAddr
 	if _, ok := n.NextIndex[lNodeAddr]; !ok {
-		n.NextIndex[lNodeAddr] = len(n.Log)
+		n.NextIndex[lNodeAddr] = n.lastLogIdx() + 1
 		n.MatchIndex[lNodeAddr] = 0
 	}
 	n.Mu.Unlock()
@@ -426,14 +454,25 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 			var appendReply AppendEntriesReply
 			n.Mu.Lock()
 			nextIdx := n.NextIndex[lNodeAddr]
+			lastInclIdx := n.StateMachine.Snapshot.LastIncludedIndex
+			lastInclTerm := n.StateMachine.Snapshot.LastIncludedTerm
+			if nextIdx <= lastInclIdx {
+				_, ok := n.SnapshotProgress[lNodeAddr]
+				n.Mu.Unlock()
+				if !ok {
+					go n.StreamSnapshot(lNodeAddr, lastInclIdx, lastInclTerm)
+				}
+				time.Sleep(HeartBeatTimeout)
+				continue
+			}
 			entriesArgs := AppendEntriesArgs{
 				LeaderID:     *n.LeaderID,
 				LeaderAddr:   *n.LeaderAddr,
 				Term:         n.Term,
 				LeaderCommit: n.CommitIndex,
-				Entries:      n.Log[nextIdx:],
+				Entries:      n.Log[nextIdx-n.LogStart:],
 				PrevLogIndex: nextIdx - 1,
-				PrevLogTerm:  n.Log[nextIdx-1].Term,
+				PrevLogTerm:  n.entryAt(nextIdx - 1).Term,
 			}
 			n.Mu.Unlock()
 			client, err := rpc.Dial("tcp", lNodeAddr)
@@ -450,7 +489,7 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 				matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
 				n.MatchIndex[lNodeAddr] = matchLogIdx
 				n.NextIndex[lNodeAddr] = matchLogIdx + 1
-				if matchLogIdx == len(n.Log)-1 {
+				if matchLogIdx == n.lastLogIdx() {
 					n.Mu.Unlock()
 					var execReply ExecCmdReply
 					cmd := LogCmd{Cmd: AddCmd, Val: lNodeAddr, NodeID: &entry.NodeID}
@@ -553,6 +592,137 @@ func (n *Node) RemoveServer(entry *ServerArgs, reply *ServerReply) error {
 	return nil
 }
 
+func (n *Node) SaveSnapshot(idx, term int, cluster map[int]string) error {
+	sm := &n.StateMachine
+	sm.Snapshot.LastIncludedIndex = idx
+	sm.Snapshot.LastIncludedTerm = term
+	sm.Snapshot.LastCluster = cluster
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(sm.State); err != nil {
+		return err
+	}
+	sm.Snapshot.Data = buf.Bytes()
+	return nil
+}
+
+func (n *Node) StreamSnapshot(addr string, lastIdx, LastTerm int) {
+	n.Mu.Lock()
+	n.SnapshotProgress[addr] = struct{}{}
+	defer func() {
+		n.Mu.Lock()
+		delete(n.SnapshotProgress, addr)
+		n.Mu.Unlock()
+	}()
+	data := n.StateMachine.Snapshot.Data
+	totalLen := len(data)
+	cluster := maps.Clone(n.StateMachine.Snapshot.LastCluster)
+	n.Mu.Unlock()
+	for offset := 0; offset < totalLen; offset += ChunkSize {
+		end := offset + ChunkSize
+		done := false
+		if end >= totalLen {
+			end = totalLen
+			done = true
+		}
+		n.Mu.RLock()
+		chunk := append([]byte(nil), data[offset:end]...)
+		entry := InstallSnapshotArgs{
+			Term:              n.Term,
+			LeaderID:          n.NodeID,
+			LeaderAddr:        n.Addr,
+			LastIncludedIndex: lastIdx,
+			LastIncludedTerm:  LastTerm,
+			LastCluster:       cluster,
+			Data:              chunk,
+			Offset:            offset,
+			Done:              done,
+		}
+		n.Mu.RUnlock()
+		client, err := rpc.Dial("tcp", addr)
+		if err != nil {
+			return
+		}
+		var reply InstallSnapshotReply
+		if err := client.Call("Node.InstallSnapshot", &entry, &reply); err != nil {
+			client.Close()
+			slog.Error("RPC install snapshot failed", "target", addr, "error", err)
+			return
+		}
+		client.Close()
+		slog.Info("Successfully sent snapshot chunk", "target", addr, "offset", offset, "end", end, "total", totalLen)
+		n.Mu.Lock()
+		if reply.Term > n.Term {
+			n.Term = reply.Term
+			n.State = Follower
+			n.VotedFor = nil
+			n.LeaderID = nil
+			n.ElectionTimer.Reset(RandomElectionTimeout())
+			n.Mu.Unlock()
+			return
+		}
+		if done {
+			n.MatchIndex[addr] = lastIdx
+			n.NextIndex[addr] = lastIdx + 1
+		}
+		n.Mu.Unlock()
+	}
+}
+
+func (n *Node) InstallSnapshot(entry *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	reply.Term = n.Term
+	if n.Term > entry.Term {
+		return nil
+	}
+	if entry.Term > n.Term {
+		n.Term = entry.Term
+		n.VotedFor = nil
+	}
+	n.State = Follower
+	n.LeaderID = &entry.LeaderID
+	n.LeaderAddr = &entry.LeaderAddr
+	n.ElectionTimer.Reset(RandomElectionTimeout())
+	if entry.LastIncludedIndex <= n.LogStart {
+		return nil
+	}
+	smSnap := &n.StateMachine.Snapshot
+	if entry.Offset == 0 {
+		smSnap.buffer = SnapshotBuffer{}
+	}
+	if entry.Offset != smSnap.buffer.offset {
+		return fmt.Errorf("unexpected chunk offset: got %d, expected %d", entry.Offset, smSnap.buffer.offset)
+	}
+	smSnap.buffer.buf = append(smSnap.buffer.buf, entry.Data...)
+	smSnap.buffer.offset += len(entry.Data)
+
+	slog.Info("Received snapshot chunk in memory", "offset", entry.Offset, "chunkLen", len(entry.Data), "done", entry.Done)
+	if entry.Done {
+		var state map[string]string
+		buf := bytes.NewReader(smSnap.buffer.buf)
+		dec := gob.NewDecoder(buf)
+		if err := dec.Decode(&state); err != nil {
+			return err
+		}
+		smSnap.Data = smSnap.buffer.buf
+		smSnap.LastCluster = entry.LastCluster
+		smSnap.LastIncludedIndex = entry.LastIncludedIndex
+		smSnap.LastIncludedTerm = entry.LastIncludedTerm
+		smSnap.buffer = SnapshotBuffer{}
+		n.StateMachine.State = state // replacing state with snapshot
+		if entry.LastIncludedIndex <= n.lastLogIdx() && n.entryAt(entry.LastIncludedIndex).Term == entry.LastIncludedTerm {
+			n.Log = n.Log[entry.LastIncludedIndex-n.LogStart:]
+		} else {
+			n.Log = []LogEntry{{Term: entry.LastIncludedTerm, VoterCluster: entry.LastCluster}}
+		}
+		n.LogStart = entry.LastIncludedIndex
+		n.CommitIndex = max(n.CommitIndex, entry.LastIncludedIndex)
+		n.LastApplied = entry.LastIncludedIndex
+	}
+	return nil
+}
+
 func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	client, err := rpc.Dial("tcp", peerAddr)
 	if err != nil {
@@ -564,16 +734,29 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		n.Mu.RUnlock()
 		return
 	}
-	var appendReply AppendEntriesReply
 	nextIdx := n.NextIndex[peerAddr]
+	lastInclIdx := n.StateMachine.Snapshot.LastIncludedIndex
+	lastInclTerm := n.StateMachine.Snapshot.LastIncludedTerm
+	n.Mu.RUnlock()
+	if nextIdx <= lastInclIdx {
+		n.Mu.RLock()
+		_, ok := n.SnapshotProgress[peerAddr]
+		n.Mu.RUnlock()
+		if !ok {
+			go n.StreamSnapshot(peerAddr, lastInclIdx, lastInclTerm)
+		}
+		return
+	}
+	var appendReply AppendEntriesReply
+	n.Mu.RLock()
 	entriesArgs := AppendEntriesArgs{
 		LeaderID:     *n.LeaderID,
 		LeaderAddr:   *n.LeaderAddr,
 		Term:         n.Term,
 		LeaderCommit: n.CommitIndex,
-		Entries:      n.Log[nextIdx:],
+		Entries:      n.Log[nextIdx-n.LogStart:],
 		PrevLogIndex: nextIdx - 1,
-		PrevLogTerm:  n.Log[nextIdx-1].Term,
+		PrevLogTerm:  n.entryAt(nextIdx - 1).Term,
 	}
 	n.Mu.RUnlock()
 	if err := client.Call("Node.AppendEntry", &entriesArgs, &appendReply); err != nil {
@@ -598,9 +781,9 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		n.MatchIndex[peerAddr] = matchLogIdx
 		n.NextIndex[peerAddr] = matchLogIdx + 1
 		// Qourum check for commit
-		for i := len(n.Log) - 1; i > n.CommitIndex; i-- {
+		for i := n.lastLogIdx(); i > n.CommitIndex; i-- {
 			// 1. If terms dont match keep looping towards begining of the log
-			if n.Term != n.Log[i].Term {
+			if n.Term != n.entryAt(i).Term {
 				continue
 			}
 			// 2. Count how many followers including leader matched or exceeded current index
@@ -612,7 +795,7 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 				// 3. If quorum achieved break
 				if count > len(n.Peers)/2 {
 					n.CommitIndex = i
-					latestCluster := maps.Clone(n.Log[i].VoterCluster)
+					latestCluster := maps.Clone(n.entryAt(i).VoterCluster)
 					delete(latestCluster, n.NodeID)
 					n.Peers = latestCluster
 					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex)
@@ -627,6 +810,16 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 	}
 }
 
+func (n *Node) ApplyState(cmd LogCmd) error {
+	key, val, found := strings.Cut(cmd.Val, "=")
+	if !found {
+		return fmt.Errorf("state machine failed to parse command: %v", cmd)
+	}
+	n.StateMachine.State[key] = val
+	slog.Info("New command was applied to the state machine", "command", cmd, "current_state", n.StateMachine.State)
+	return nil
+}
+
 func (n *Node) ApplyLogWorker() {
 	for {
 		n.Mu.Lock()
@@ -637,17 +830,32 @@ func (n *Node) ApplyLogWorker() {
 			n.Mu.Lock()
 		}
 		n.LastApplied++
-		entry := n.Log[n.LastApplied]
-		n.Mu.Unlock()
+		lastEntryIdx := n.LastApplied
+		entry := n.entryAt(lastEntryIdx)
 		if entry.Command.Cmd != SetCmd {
 			slog.Debug("Worker detected cluster change cmd, skipping applying command to state machine", "node", n.NodeID)
+			n.Mu.Unlock()
 			continue
 		}
-		if err := n.StateMachine.Apply(entry.Command); err != nil {
+		if err := n.ApplyState(entry.Command); err != nil {
 			slog.Error("Worker received error while applaying entry command to state machine", "node", n.NodeID, "error", err)
+			n.Mu.Unlock()
+
 			return
 		}
 		slog.Debug("Worker successfully aplied entry command to state machine", "node", n.NodeID)
+		if len(n.Log) >= SnapshotThreshold {
+			if err := n.SaveSnapshot(lastEntryIdx, entry.Term, entry.VoterCluster); err != nil {
+				slog.Error("Error while saving a snahpost", "node", n.NodeID, "error", err)
+				n.Mu.Unlock()
+				return
+			}
+			n.Log = n.Log[lastEntryIdx-n.LogStart:]
+			n.LogStart = lastEntryIdx
+			slog.Info("Truncated log", "index", lastEntryIdx, "truncated_log", n.Log)
+		}
+		n.Mu.Unlock()
+
 	}
 }
 
@@ -672,17 +880,24 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	// Optimization to avoid trying every index if follower or learner (new added node that is most likely empty) log is empty
-	if entry.PrevLogIndex >= len(n.Log) {
-		lastIdx := len(n.Log)
+	if entry.PrevLogIndex > n.lastLogIdx() {
+		lastIdx := n.lastLogIdx() + 1
 		reply.ConflictIdx = &lastIdx
 		reply.ConflictTerm = nil
 		return nil
 	}
-	// Optimization to avoid trying all indexes if we know that log length is less or equal but terms or off
-	if entry.PrevLogTerm != n.Log[entry.PrevLogIndex].Term {
+	// Compaction: before reading, the follower checks whether that entry is one it already threw away
+	if entry.PrevLogIndex < n.LogStart {
+		nextIdx := n.LogStart + 1
+		reply.ConflictIdx = &nextIdx
+		reply.ConflictTerm = nil
+		return nil
+	}
+	// Optimization to avoid trying all indexes if we know that log length is less or equal but terms are off
+	if entry.PrevLogTerm != n.entryAt(entry.PrevLogIndex).Term {
 		conflictIdx := entry.PrevLogIndex
-		conflictTerm := n.Log[entry.PrevLogIndex].Term
-		for conflictIdx > 0 && n.Log[conflictIdx-1].Term == conflictTerm {
+		conflictTerm := n.entryAt(conflictIdx).Term
+		for conflictIdx > n.LogStart && n.entryAt(conflictIdx-1).Term == conflictTerm {
 			conflictIdx--
 		}
 		reply.ConflictIdx = &conflictIdx
@@ -691,15 +906,15 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 	for idx, currentEntry := range entry.Entries {
 		currentIdx := entry.PrevLogIndex + 1 + idx
-		if currentIdx >= len(n.Log) {
+		if currentIdx > n.lastLogIdx() {
 			// Append any new entries not already in the log
 			n.Log = append(n.Log, entry.Entries[idx:]...)
 			break
 		}
 		// If an existing entry conflicts with a new one (same index but different terms),
 		// delete the existing entry and all that follow it (§5.3)
-		if existingEntry := n.Log[currentIdx]; existingEntry.Term != currentEntry.Term {
-			n.Log = n.Log[:currentIdx]
+		if existingEntry := n.entryAt(currentIdx); existingEntry.Term != currentEntry.Term {
+			n.Log = n.Log[:currentIdx-n.LogStart]
 			n.Log = append(n.Log, entry.Entries[idx:]...)
 			break
 		}

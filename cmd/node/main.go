@@ -92,6 +92,7 @@ func main() {
 						node.LeaderAddr = &node.Addr
 						node.NextIndex = raft.InitIndexMap(node.Peers, node.NodeID, 1)
 						node.MatchIndex = raft.InitIndexMap(node.Peers, node.NodeID, 0)
+						node.SnapshotProgress = make(map[string]struct{})
 						node.SendHeartBeat()
 						heartbTicker.Reset(raft.HeartBeatTimeout)
 						node.Mu.Unlock()
