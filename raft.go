@@ -38,6 +38,7 @@ type ExecCmdReply struct {
 	PossibleLeader     *int
 	PossibleLeaderAddr *string
 	LastLogIdx         *int
+	Term               int
 	Busy               bool
 	Success            bool
 }
@@ -202,26 +203,27 @@ type StateMachine struct {
 }
 
 type Node struct {
-	NodeID           int
-	LeaderID         *int
-	LeaderAddr       *string
-	Role             NodeRole
-	State            NodeState
-	StateMachine     StateMachine
-	Term             int
-	VotedFor         *int
-	Addr             string
-	CommitIndex      int
-	LastApplied      int
-	Log              []LogEntry
-	LogStart         int
-	Peers            map[int]string
-	NextIndex        map[string]int
-	MatchIndex       map[string]int
-	SnapshotProgress map[string]struct{}
-	ElectionTimer    *time.Timer
-	Mu               sync.RWMutex
-	CommitCh         chan struct{}
+	NodeID            int
+	LeaderID          *int
+	LeaderAddr        *string
+	Role              NodeRole
+	State             NodeState
+	StateMachine      StateMachine
+	Term              int
+	VotedFor          *int
+	Addr              string
+	CommitIndex       int
+	LastApplied       int
+	Log               []LogEntry
+	LogStart          int
+	Peers             map[int]string
+	NextIndex         map[string]int
+	MatchIndex        map[string]int
+	SnapshotProgress  map[string]struct{}
+	ElectionTimer     *time.Timer
+	LastLeaderContact time.Time
+	Mu                sync.RWMutex
+	CommitCh          chan struct{}
 }
 
 func (n *Node) isLeader() bool {
@@ -235,17 +237,23 @@ func (n *Node) entryAt(idx int) LogEntry {
 	return n.Log[idx-n.LogStart]
 }
 
-func (n *Node) lastLogIdx() int {
+func (n *Node) LastLogIdx() int {
 	return n.LogStart + len(n.Log) - 1
 }
 
 func (n *Node) hasPendingChange() bool {
-	for i := n.CommitIndex + 1; i <= n.lastLogIdx(); i++ {
-		if n.entryAt(i).Command.Cmd == AddCmd {
+	for i := n.CommitIndex + 1; i <= n.LastLogIdx(); i++ {
+		if n.entryAt(i).Command.Cmd == AddCmd || n.entryAt(i).Command.Cmd == RemoveCmd {
 			return true
 		}
 	}
 	return false
+}
+
+func (n *Node) peersFromLog() {
+	cluster := maps.Clone(n.entryAt(n.LastLogIdx()).VoterCluster)
+	delete(cluster, n.NodeID)
+	n.Peers = cluster
 }
 
 // Optimizations so we dont check all indexes one by one if we can guess where next index should be (see AppendEntry method).
@@ -254,7 +262,7 @@ func (n *Node) nextIndexGuess(addr string, appendReply AppendEntriesReply) {
 		n.NextIndex[addr] = *appendReply.ConflictIdx
 	} else if appendReply.ConflictIdx != nil && appendReply.ConflictTerm != nil {
 		lastIdxTerm := -1
-		for i := n.lastLogIdx(); i > n.LogStart; i-- {
+		for i := n.LastLogIdx(); i > n.LogStart; i-- {
 			if n.entryAt(i).Term == *appendReply.ConflictTerm {
 				lastIdxTerm = i
 				break
@@ -295,7 +303,7 @@ func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 
 			var voteReply VoteReply
 			n.Mu.RLock()
-			lastLogIdx := n.lastLogIdx()
+			lastLogIdx := n.LastLogIdx()
 			lastLogTerm := n.entryAt(lastLogIdx).Term
 			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term, LastLogIndex: lastLogIdx, LastLogTerm: lastLogTerm}
 			n.Mu.RUnlock()
@@ -318,7 +326,10 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 	reply.FromID = n.NodeID
 	reply.Term = n.Term
 	reply.VoteGranted = false
-
+	// A time check for last contact from the leader, to prevent paused node to raise terms and start election
+	if n.State == Leader || time.Since(n.LastLeaderContact) < ElectionTimeout {
+		return nil
+	}
 	// If candidate's term is smaller than ours, say NO.
 	if candidate.Term < n.Term {
 		return nil
@@ -335,7 +346,7 @@ func (n *Node) GiveVote(candidate *RequestVoteArgs, reply *VoteReply) error {
 	}
 	// if candidates log term is lower then nodes, or the terms are equal but index is lower then nodes,
 	// say NO.
-	lastLogIdx := n.lastLogIdx()
+	lastLogIdx := n.LastLogIdx()
 	lastLogTerm := n.entryAt(lastLogIdx).Term
 	if candidate.LastLogTerm < lastLogTerm || (candidate.LastLogTerm == lastLogTerm && candidate.LastLogIndex < lastLogIdx) {
 		return nil
@@ -390,23 +401,26 @@ func (n *Node) GetNode(cmd *string, reply *GetNodeCmdReply) error {
 func (n *Node) ExecuteCommand(cmd *LogCmd, reply *ExecCmdReply) error {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
+	reply.Term = n.Term
 	if n.isLeader() {
 		if (cmd.Cmd == AddCmd || cmd.Cmd == RemoveCmd) && n.hasPendingChange() {
+			slog.Warn("Membership change rejected, another change is not committed yet", "cmd", cmd.Cmd, "node", cmd.Val)
 			reply.Busy = true
 			reply.Success = false
 			return nil
-		} else if cmd.Cmd == AddCmd && cmd.NodeID != nil {
-			n.Peers[*cmd.NodeID] = cmd.Val
 		}
-		voterCluster := n.voterCluster()
-		if cmd.Cmd == RemoveCmd && cmd.NodeID != nil {
+		voterCluster := maps.Clone(n.entryAt(n.LastLogIdx()).VoterCluster)
+		if cmd.Cmd == AddCmd && cmd.NodeID != nil {
+			voterCluster[*cmd.NodeID] = cmd.Val
+		} else if cmd.Cmd == RemoveCmd && cmd.NodeID != nil {
 			delete(voterCluster, *cmd.NodeID)
 		}
 		reply.LeaderID = &n.NodeID
 		reply.LeaderAddr = &n.Addr
 		reply.Success = true
 		n.Log = append(n.Log, LogEntry{Term: n.Term, Command: *cmd, VoterCluster: voterCluster})
-		lastLogIdx := n.lastLogIdx()
+		n.peersFromLog()
+		lastLogIdx := n.LastLogIdx()
 		reply.LastLogIdx = &lastLogIdx
 		for peerID, peerAddr := range n.Peers {
 			if peerAddr == n.Addr {
@@ -434,7 +448,7 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 	}
 	lNodeAddr := entry.NodeAddr
 	if _, ok := n.NextIndex[lNodeAddr]; !ok {
-		n.NextIndex[lNodeAddr] = n.lastLogIdx() + 1
+		n.NextIndex[lNodeAddr] = n.LastLogIdx() + 1
 		n.MatchIndex[lNodeAddr] = 0
 	}
 	n.Mu.Unlock()
@@ -489,7 +503,7 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 				matchLogIdx := entriesArgs.PrevLogIndex + len(entriesArgs.Entries)
 				n.MatchIndex[lNodeAddr] = matchLogIdx
 				n.NextIndex[lNodeAddr] = matchLogIdx + 1
-				if matchLogIdx == n.lastLogIdx() {
+				if matchLogIdx == n.LastLogIdx() {
 					n.Mu.Unlock()
 					var execReply ExecCmdReply
 					cmd := LogCmd{Cmd: AddCmd, Val: lNodeAddr, NodeID: &entry.NodeID}
@@ -509,6 +523,10 @@ func (n *Node) AddServer(entry *AddServerArgs, reply *ServerReply) error {
 								reply.Expired = true
 								return nil
 							}
+						}
+						if n.Term != execReply.Term {
+							n.Mu.RUnlock()
+							return nil
 						}
 						n.Mu.RUnlock()
 						cmdPromote := "promoteVoter"
@@ -567,7 +585,6 @@ func (n *Node) RemoveServer(entry *ServerArgs, reply *ServerReply) error {
 			n.Mu.RUnlock()
 			select {
 			case <-ch:
-				reply.Success = true
 				n.Mu.RLock()
 			case <-timer.C:
 				reply.Expired = true
@@ -576,6 +593,10 @@ func (n *Node) RemoveServer(entry *ServerArgs, reply *ServerReply) error {
 		}
 		n.Mu.RUnlock()
 		n.Mu.Lock()
+		if n.Term != execReply.Term {
+			n.Mu.Unlock()
+			return nil
+		}
 		reply.LeaderID = &n.NodeID
 		reply.LeaderAddr = &n.Addr
 		if n.NodeID == entry.NodeID {
@@ -584,8 +605,6 @@ func (n *Node) RemoveServer(entry *ServerArgs, reply *ServerReply) error {
 			reply.LeaderID = nil
 			reply.LeaderAddr = nil
 		}
-		delete(n.Peers, entry.NodeID)
-
 		reply.Success = true
 		n.Mu.Unlock()
 	}
@@ -616,6 +635,7 @@ func (n *Node) StreamSnapshot(addr string, lastIdx, LastTerm int) {
 	}()
 	data := n.StateMachine.Snapshot.Data
 	totalLen := len(data)
+	curTerm := n.Term
 	cluster := maps.Clone(n.StateMachine.Snapshot.LastCluster)
 	n.Mu.Unlock()
 	for offset := 0; offset < totalLen; offset += ChunkSize {
@@ -626,9 +646,13 @@ func (n *Node) StreamSnapshot(addr string, lastIdx, LastTerm int) {
 			done = true
 		}
 		n.Mu.RLock()
+		if n.State != Leader || n.Term != curTerm {
+			n.Mu.RUnlock()
+			return
+		}
 		chunk := append([]byte(nil), data[offset:end]...)
 		entry := InstallSnapshotArgs{
-			Term:              n.Term,
+			Term:              curTerm,
 			LeaderID:          n.NodeID,
 			LeaderAddr:        n.Addr,
 			LastIncludedIndex: lastIdx,
@@ -661,7 +685,7 @@ func (n *Node) StreamSnapshot(addr string, lastIdx, LastTerm int) {
 			n.Mu.Unlock()
 			return
 		}
-		if done {
+		if done && n.State == Leader && n.Term == curTerm {
 			n.MatchIndex[addr] = lastIdx
 			n.NextIndex[addr] = lastIdx + 1
 		}
@@ -684,6 +708,7 @@ func (n *Node) InstallSnapshot(entry *InstallSnapshotArgs, reply *InstallSnapsho
 	n.LeaderID = &entry.LeaderID
 	n.LeaderAddr = &entry.LeaderAddr
 	n.ElectionTimer.Reset(RandomElectionTimeout())
+	n.LastLeaderContact = time.Now()
 	if entry.LastIncludedIndex <= n.LogStart {
 		return nil
 	}
@@ -711,7 +736,7 @@ func (n *Node) InstallSnapshot(entry *InstallSnapshotArgs, reply *InstallSnapsho
 		smSnap.LastIncludedTerm = entry.LastIncludedTerm
 		smSnap.buffer = SnapshotBuffer{}
 		n.StateMachine.State = state // replacing state with snapshot
-		if entry.LastIncludedIndex <= n.lastLogIdx() && n.entryAt(entry.LastIncludedIndex).Term == entry.LastIncludedTerm {
+		if entry.LastIncludedIndex <= n.LastLogIdx() && n.entryAt(entry.LastIncludedIndex).Term == entry.LastIncludedTerm {
 			n.Log = n.Log[entry.LastIncludedIndex-n.LogStart:]
 		} else {
 			n.Log = []LogEntry{{Term: entry.LastIncludedTerm, VoterCluster: entry.LastCluster}}
@@ -719,6 +744,7 @@ func (n *Node) InstallSnapshot(entry *InstallSnapshotArgs, reply *InstallSnapsho
 		n.LogStart = entry.LastIncludedIndex
 		n.CommitIndex = max(n.CommitIndex, entry.LastIncludedIndex)
 		n.LastApplied = entry.LastIncludedIndex
+		n.peersFromLog()
 	}
 	return nil
 }
@@ -781,23 +807,20 @@ func (n *Node) ReplicateLog(peerID int, peerAddr string) {
 		n.MatchIndex[peerAddr] = matchLogIdx
 		n.NextIndex[peerAddr] = matchLogIdx + 1
 		// Qourum check for commit
-		for i := n.lastLogIdx(); i > n.CommitIndex; i-- {
+		for i := n.LastLogIdx(); i > n.CommitIndex; i-- {
 			// 1. If terms dont match keep looping towards begining of the log
 			if n.Term != n.entryAt(i).Term {
 				continue
 			}
 			// 2. Count how many followers including leader matched or exceeded current index
 			count := 1
-			for _, matchIdx := range n.MatchIndex {
-				if matchIdx >= i {
+			for _, addr := range n.Peers {
+				if n.MatchIndex[addr] >= i {
 					count++
 				}
 				// 3. If quorum achieved break
-				if count > len(n.Peers)/2 {
+				if count > (len(n.Peers)+1)/2 {
 					n.CommitIndex = i
-					latestCluster := maps.Clone(n.entryAt(i).VoterCluster)
-					delete(latestCluster, n.NodeID)
-					n.Peers = latestCluster
 					slog.Info("Current commit index found", "leader", n.NodeID, "term", n.Term, "commit_index", n.CommitIndex)
 					close(n.CommitCh)
 					n.CommitCh = make(chan struct{})
@@ -877,11 +900,12 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	n.LeaderID = &entry.LeaderID
 	n.LeaderAddr = &entry.LeaderAddr
 	n.ElectionTimer.Reset(RandomElectionTimeout())
+	n.LastLeaderContact = time.Now()
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	// Optimization to avoid trying every index if follower or learner (new added node that is most likely empty) log is empty
-	if entry.PrevLogIndex > n.lastLogIdx() {
-		lastIdx := n.lastLogIdx() + 1
+	if entry.PrevLogIndex > n.LastLogIdx() {
+		lastIdx := n.LastLogIdx() + 1
 		reply.ConflictIdx = &lastIdx
 		reply.ConflictTerm = nil
 		return nil
@@ -906,7 +930,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 	for idx, currentEntry := range entry.Entries {
 		currentIdx := entry.PrevLogIndex + 1 + idx
-		if currentIdx > n.lastLogIdx() {
+		if currentIdx > n.LastLogIdx() {
 			// Append any new entries not already in the log
 			n.Log = append(n.Log, entry.Entries[idx:]...)
 			break
@@ -919,6 +943,7 @@ func (n *Node) AppendEntry(entry *AppendEntriesArgs, reply *AppendEntriesReply) 
 			break
 		}
 	}
+	n.peersFromLog()
 	slog.Debug("Current log", "entries", n.Log, "leader", entry.LeaderID, "follower", n.NodeID)
 	newCommitIdx := min(entry.LeaderCommit, entry.PrevLogIndex+len(entry.Entries))
 	if newCommitIdx > n.CommitIndex {

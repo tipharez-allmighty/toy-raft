@@ -85,12 +85,12 @@ func main() {
 				// 3. COUNT VOTES FROM CURRENT TERM.
 				if vote.VoteGranted {
 					votes++
-					majority := len(node.Peers)/2 + 1
+					majority := (len(node.Peers)+1)/2 + 1
 					if votes >= majority {
 						node.State = raft.Leader
 						node.LeaderID = &node.NodeID
 						node.LeaderAddr = &node.Addr
-						node.NextIndex = raft.InitIndexMap(node.Peers, node.NodeID, 1)
+						node.NextIndex = raft.InitIndexMap(node.Peers, node.NodeID, node.LastLogIdx()+1)
 						node.MatchIndex = raft.InitIndexMap(node.Peers, node.NodeID, 0)
 						node.SnapshotProgress = make(map[string]struct{})
 						node.SendHeartBeat()

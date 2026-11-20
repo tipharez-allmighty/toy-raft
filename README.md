@@ -23,6 +23,9 @@ So far it covers **leader election** (section 5.2 of the paper):
   - The leader catches the new node's log up before adding it to the cluster. If that takes too long, the request expires and the client reports it so you can try again.
   - `raft-cli remove <address:port>` works the same way: it looks the node up with `GetNode`, then sends `RemoveServer` to the leader, which commits the removal to the log.
   - Only one membership change can be in progress at a time.
+- **Log compaction** (section 7 of the paper):
+  - Once the log reaches `SnapshotThreshold` entries, each node saves a snapshot of its state machine and drops the applied entries from its log.
+  - A follower that is too far behind (or a newly added node) gets the snapshot from the leader with `InstallSnapshot`, sent in chunks of `ChunkSize` bytes.
 
 It also has **leader discovery** for the client:
 
@@ -115,7 +118,9 @@ Find the current leader in the logs (`Leader has been elected`) and pause it. Wi
 
 The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down two nodes and still have a leader. With three nodes down, elections keep failing until a node comes back.
 
+For a full step-by-step manual test (replication, compaction, failover, membership changes, majority), see [test.md](test.md).
+
 ## Status
 Planned features:
-- log compaction (section 7)
+- Pre-Vote (section 9.6 of the dissertation)
 
