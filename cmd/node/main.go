@@ -21,7 +21,10 @@ func main() {
 		os.Exit(1)
 	}
 	var votes int
+	var preVotes map[int]struct{}
 	voteChan := make(chan raft.VoteReply)
+	preVoteChan := make(chan raft.VoteReply)
+
 	defer l.Close()
 	go func() {
 		for {
@@ -52,15 +55,33 @@ func main() {
 				continue
 			}
 			if node.State != raft.Leader {
-				node.State = raft.Candidate
-				node.Term++
-				node.VotedFor = &node.NodeID
-				node.NextIndex = nil
-				node.LeaderID = nil
-				node.LeaderAddr = nil
-				votes = 1
-				node.RequestVote(voteChan)
+				node.State = raft.PreCandidate
+				preVotes = make(map[int]struct{})
+				node.RequestPreVote(preVoteChan)
 				node.ElectionTimer.Reset(raft.RandomElectionTimeout())
+			}
+			node.Mu.Unlock()
+		case preVote := <-preVoteChan:
+			node.Mu.Lock()
+			// Ignore replies tht arrive when we are not pre-voting or ones belonging to an older round
+			if node.State != raft.PreCandidate || preVote.Term != node.Term+1 {
+				node.Mu.Unlock()
+				continue
+			}
+			if preVote.VoteGranted {
+				preVotes[preVote.FromID] = struct{}{}
+				majority := (len(node.Peers)+1)/2 + 1
+				if len(preVotes)+1 >= majority {
+					node.State = raft.Candidate
+					node.Term++
+					node.VotedFor = &node.NodeID
+					node.NextIndex = nil
+					node.LeaderID = nil
+					node.LeaderAddr = nil
+					votes = 1
+					node.RequestVote(voteChan)
+					node.ElectionTimer.Reset(raft.RandomElectionTimeout())
+				}
 			}
 			node.Mu.Unlock()
 		case vote := <-voteChan:

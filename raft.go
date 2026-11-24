@@ -126,8 +126,8 @@ type RequestVoteArgs struct {
 }
 type VoteReply struct {
 	FromID      int
-	Term        int
 	VoteGranted bool
+	Term        int
 }
 
 type InstallSnapshotArgs struct {
@@ -181,9 +181,10 @@ func (nr NodeRole) IsValid() bool {
 type NodeState string
 
 const (
-	Follower  NodeState = "follower"
-	Candidate NodeState = "candidate"
-	Leader    NodeState = "leader"
+	Follower     NodeState = "follower"
+	PreCandidate NodeState = "precandidate"
+	Candidate    NodeState = "candidate"
+	Leader       NodeState = "leader"
 )
 
 type SnapshotBuffer struct {
@@ -220,6 +221,7 @@ type Node struct {
 	NextIndex         map[string]int
 	MatchIndex        map[string]int
 	SnapshotProgress  map[string]struct{}
+	PreVotes          map[int]struct{}
 	ElectionTimer     *time.Timer
 	LastLeaderContact time.Time
 	Mu                sync.RWMutex
@@ -287,12 +289,70 @@ func (n *Node) voterCluster() map[int]string {
 	return currentCluster
 }
 
+func (n *Node) RequestPreVote(preVoteChan chan<- VoteReply) {
+	for peerID, peerAddr := range n.Peers {
+		if peerAddr == n.Addr {
+			continue
+		}
+		slog.Info("Processing pre vote rpc call", "peer", peerID, "address", peerAddr)
+
+		go func(addr string) {
+			client, err := rpc.Dial("tcp", addr)
+			if err != nil {
+				return
+			}
+			defer client.Close()
+
+			var voteReply VoteReply
+			n.Mu.RLock()
+			lastLogIdx := n.LastLogIdx()
+			lastLogTerm := n.entryAt(lastLogIdx).Term
+			candidate := RequestVoteArgs{NodeID: n.NodeID, Term: n.Term + 1, LastLogIndex: lastLogIdx, LastLogTerm: lastLogTerm}
+			n.Mu.RUnlock()
+			if err := client.Call("Node.PreVote", &candidate, &voteReply); err != nil {
+				slog.Error("RPC pre voting call failed", "target", addr, "error", err)
+				return
+			}
+			preVoteChan <- voteReply
+		}(peerAddr)
+	}
+}
+
+func (n *Node) PreVote(candidate *RequestVoteArgs, reply *VoteReply) error {
+	// Pre vote is almost the same as give vote but it doesnt change state
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if n.Role != Voter {
+		return nil
+	}
+	reply.FromID = n.NodeID
+	reply.Term = candidate.Term
+	reply.VoteGranted = false
+	// A time check for last contact from the leader, to prevent paused node to raise terms and start election
+	if n.State == Leader || time.Since(n.LastLeaderContact) < ElectionTimeout {
+		return nil
+	}
+	// If candidate's term is smaller than ours, say NO.
+	if candidate.Term < n.Term {
+		return nil
+	}
+	// if candidates log term is lower then nodes, or the terms are equal but index is lower then nodes,
+	// say NO.
+	lastLogIdx := n.LastLogIdx()
+	lastLogTerm := n.entryAt(lastLogIdx).Term
+	if candidate.LastLogTerm < lastLogTerm || (candidate.LastLogTerm == lastLogTerm && candidate.LastLogIndex < lastLogIdx) {
+		return nil
+	}
+	reply.VoteGranted = true
+	return nil
+}
+
 func (n *Node) RequestVote(voteChan chan<- VoteReply) {
 	for peerID, peerAddr := range n.Peers {
 		if peerAddr == n.Addr {
 			continue
 		}
-		slog.Info("Processing new rpc call", "peer", peerID, "address", peerAddr)
+		slog.Info("Processing vote rpc call", "peer", peerID, "address", peerAddr)
 
 		go func(addr string) {
 			client, err := rpc.Dial("tcp", addr)
