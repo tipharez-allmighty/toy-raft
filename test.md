@@ -116,10 +116,10 @@ podman logs node4 2>&1 | grep "applied to the state machine" | tail -1
 
 `current_state` on node4 should contain all `p1..p9` keys plus `after` (it got them from the snapshot, not from the log).
 
-The leader may change right after the unpause (node4 comes back with a higher term; see Pre-Vote in the README). Run `raft-client explore` again and check the chunks on the current leader:
+Check the chunks in the leader's logs. `<leader>` is the leader from the `explore` above (for example node1). `target=` stays node4, because node4 is the node that receives the chunks:
 
 ```sh
-podman logs <leader> 2>&1 | grep "snapshot chunk target=node4"
+podman logs <leader> 2>&1 | grep "snapshot chunk target=node4"   # node4 = the follower you paused; if you paused another node, use its name
 podman logs node4 2>&1 | grep "snapshot chunk"
 ```
 
@@ -150,7 +150,7 @@ The placeholder is in `n.Log`, not in `current_state` (`n.StateMachine.State`). 
 
 ```sh
 raft-client explore                      # note the leader, e.g. node1
-podman pause node1               # pause the leader
+podman pause node1                       # pause the leader
 raft-client explore                      # a new leader within ~300ms
 raft-client set x=after_failover
 podman unpause node1
@@ -208,27 +208,25 @@ podman run -d --name node7 --hostname node7 --network raft-net \
 raft-client add node7:50051
 ```
 
-Run two removes at the same time:
+With all nodes up, a remove commits in a few milliseconds, so two removes sent "at the same time" almost never overlap. To force the overlap, pause every node except the leader, node6 and node7. Then the first remove can't commit, and the second one arrives while it is still pending.
+
+The commands assume the leader is node4. Run `raft-client explore` first; if the leader is another node, pause node4 instead of that node.
 
 ```sh
-podman compose run --rm -T cli-client remove node7:50051 < /dev/null & \
-podman compose run --rm -T cli-client remove node6:50051 < /dev/null & \
-wait
+raft-client explore                       # leader must be node4 (or swap names, see above)
+podman pause node1 node2 node3 node5      # leader node4 + node6 + node7 = 3 of 7, no majority
+raft-client remove node7:50051            # can't commit, CLI prints "Membership change process exipred"
+raft-client remove node6:50051            # rejected, CLI only shows timeouts and "Possible leader already visited"
+podman logs node4 2>&1 | grep "Membership change rejected"
+podman unpause node1 node2 node3 node5
+raft-client set after=6b                  # makes the pending remove commit if an election happened
+raft-client explore                       # node7 gone from Peers, node6 still there
 ```
 
-`-T` and `< /dev/null` keep the shell from suspending the two background jobs.
-
-Expected: one succeeds, the other is rejected as busy (or retried after the first commits), never both in flight together.
-
-Which of the two happens depends on timing:
-- **Both print `Client successfully changed cluster membership`:** the second remove arrived after the first had committed. Pass.
-- **Only one prints it** (the other only shows `Possible leader already visited`): they overlapped and the leader rejected one. Pass. The leader's log shows it:
-
-```sh
-podman logs <leader> 2>&1 | grep "Membership change rejected"
-```
-
-`Membership change rejected, another change is not committed yet cmd=remove node=...`. If both succeeded, this `grep` prints nothing, which is also fine.
+Expected:
+- The `grep` prints `Membership change rejected, another change is not committed yet cmd=remove node=node6:50051`.
+- After the unpause, the pending node7 remove commits, and node6 stays a member for step 7.
+- The CLI never says "busy": `ServerReply` has no `Busy` field, so the rejection only shows in the leader's log.
 
 ---
 

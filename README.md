@@ -8,15 +8,17 @@ A toy implementation of the Raft consensus algorithm in Go, based on the
 So far it covers **leader election** (section 5.2 of the paper):
 
 - A 5-node cluster, each node in its own container, talking over Go `net/rpc`.
-- Each node is a follower, candidate or leader, and tracks its current term and who it voted for.
+- Each node is a follower, pre-candidate, candidate or leader, and tracks its current term and who it voted for.
 - **Randomized election timeouts** (150–300ms): if a follower hears nothing from a leader, it becomes a candidate, increments its term, votes for itself and sends `RequestVote` to its peers.
 - **Voting rules:** a node rejects candidates with an older term, steps down when it sees a newer term, and grants at most one vote per term.
+- **Pre-Vote** (section 9.6 of the dissertation): prevents a node that was cut off from coming back with a higher term and forcing a working leader to step down.
 - **Majority wins:** a candidate with votes from a majority of the cluster becomes leader.
 - **Heartbeats:** the leader sends empty `AppendEntries` every 50ms to keep its leadership. Followers reset their election timer when a heartbeat arrives.
 - **Log replication**: Log is replicated to all the followers after client sends execute command request to the leader.
 - **Commit:** once an entry is stored on a majority of nodes, the leader advances its commit index and followers pick it up from the next `AppendEntries`.
 - **State machine:** a key-value store (`map[string]string`). A background worker applies committed entries in order, so `set x=10` sets `x` to `10`.
 - **Election restriction**: voter denies its vote if its own log is more up-to-date than that of the candidate.
+- **Leader discovery** for the client: the CLI sends `ExecuteCommand` to a random node, a follower replies with the leader it learned from heartbeats, and the client tries each node at most once before giving up.
 - **Membership changes**: adding and removing servers in a running cluster (single-server change from Ch. 4 of the Dissertation):
   - `raft-cli add <address:port>` asks the new node for its ID, address and peers (`GetNode` RPC).
   - It then sends `AddServer` to those peers, following leader hints the same way as `set`, until it reaches the leader.
@@ -27,12 +29,6 @@ So far it covers **leader election** (section 5.2 of the paper):
   - Once the log reaches `SnapshotThreshold` entries, each node saves a snapshot of its state machine and drops the applied entries from its log.
   - A follower that is too far behind (or a newly added node) gets the snapshot from the leader with `InstallSnapshot`, sent in chunks of `ChunkSize` bytes.
 
-It also has **leader discovery** for the client:
-
-- Each node remembers the current leader it learned from heartbeats.
-- The CLI sends its command to a random node via the `ExecuteCommand` RPC. If that node is the leader, it accepts the command and appends it to its log.
-- If the node is not the leader, it replies with the leader it knows about (if any). The client tries that node next, otherwise it moves on to another random node.
-- Each node is tried at most once. If none of them is the leader, the client gives up.
 
 
 
@@ -119,8 +115,4 @@ Find the current leader in the logs (`Leader has been elected`) and pause it. Wi
 The cluster needs a majority (3 of 5 nodes) to elect a leader. You can take down two nodes and still have a leader. With three nodes down, elections keep failing until a node comes back.
 
 For a full step-by-step manual test (replication, compaction, failover, membership changes, majority), see [test.md](test.md).
-
-## Status
-Planned features:
-- Pre-Vote (section 9.6 of the dissertation)
 
